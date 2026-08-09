@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm --dir web install --frozen-lockfile
+
+      - name: Check frontend formatting
+        run: pnpm --dir web format:check
+
+      - name: Lint frontend
+        run: pnpm --dir web lint
+
+      - name: Test frontend
+        run: pnpm --dir web test
+
+      - name: Build frontend
+        run: pnpm --dir web build
+
+      - name: Test Go with race detector
+        run: go test -race ./...
+
+      - name: Vet Go
+        run: go vet ./...
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      CGO_ENABLED: 0
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Build frontend
+        run: |
+          pnpm --dir web install --frozen-lockfile
+          pnpm --dir web build
+
+      - name: Build release archives
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p release staging
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            name="SA-MP-Pilot-${VERSION}-${os}-${arch}"
+            package="staging/${name}"
+            mkdir -p "${package}/web"
+            cp -R web/dist "${package}/web/dist"
+            cp README.md "${package}/README.md"
+            binary="sa-mp-pilot"
+            if [ "${os}" = "windows" ]; then
+              binary="sa-mp-pilot.exe"
+            fi
+            GOOS="${os}" GOARCH="${arch}" go build \
+              -trimpath \
+              -ldflags="-s -w -X main.version=${VERSION}" \
+              -o "${package}/${binary}" \
+              ./cmd/sa-mp-pilot
+            if [ "${os}" = "windows" ]; then
+              (cd staging && zip -qr "../release/${name}.zip" "${name}")
+            else
+              tar -C staging -czf "release/${name}.tar.gz" "${name}"
+            fi
+          done
+          (cd release && sha256sum ./* > checksums.txt)
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: release/*
+          generate_release_notes: true

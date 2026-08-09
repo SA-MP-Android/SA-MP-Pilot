@@ -1,0 +1,7 @@
+bin/
+web/dist/
+web/node_modules/
+data/
+/data.json
+/logs/
+*.log
