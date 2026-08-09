@@ -44,6 +44,7 @@ type instance struct {
 	cancel   context.CancelFunc
 	client   *samp.Client
 	position [3]float32
+	playerID int
 }
 type subscriber struct {
 	state chan domain.Event
@@ -200,7 +201,7 @@ func (m *Manager) DeleteCommand(id, commandID string) error {
 	return nil
 }
 func newInstance(s domain.Server) *instance {
-	return &instance{snap: domain.Snapshot{Server: s, Connection: domain.Connection{Status: domain.StatusDisconnected}, Chat: []domain.ChatMessage{}, Players: []domain.Player{}, NearbyPlayers: []domain.Player{}, Vehicles: []domain.Vehicle{}, Objects: []domain.Object{}, TextDraws: []domain.TextDraw{}, Dialogs: []domain.Dialog{}, Commands: []domain.QuickCommand{}, VehicleState: domain.VehicleState{VehicleID: domain.InvalidVehicleID}}}
+	return &instance{snap: domain.Snapshot{Server: s, Connection: domain.Connection{Status: domain.StatusDisconnected}, Chat: []domain.ChatMessage{}, Players: []domain.Player{}, NearbyPlayers: []domain.Player{}, Vehicles: []domain.Vehicle{}, Objects: []domain.Object{}, TextDraws: []domain.TextDraw{}, Dialogs: []domain.Dialog{}, Commands: []domain.QuickCommand{}, VehicleState: domain.VehicleState{VehicleID: domain.InvalidVehicleID}}, playerID: domain.InvalidPlayerID}
 }
 func (m *Manager) List() []domain.Snapshot {
 	m.mu.RLock()
@@ -328,6 +329,7 @@ func (m *Manager) Connect(id string) error {
 	i.cancel = cancel
 	i.snap.Connection = domain.Connection{Status: domain.StatusConnecting}
 	i.snap.Spawned = false
+	i.playerID = domain.InvalidPlayerID
 	s := i.snap.Server
 	m.appendChat(i, fmt.Sprintf("Connecting to %s:%d...", s.Host, s.Port), defaultChatColor)
 	i.mu.Unlock()
@@ -384,8 +386,9 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 		switch event.Type {
 		case samp.EventJoined:
 			localPlayer := event.Data.(samp.PlayerEvent)
+			i.playerID = int(localPlayer.ID)
 			i.snap.Players = upsertPlayer(i.snap.Players, domain.Player{ID: int(localPlayer.ID), Name: s.Nickname})
-			i.snap.Players = movePlayerFirst(i.snap.Players, int(localPlayer.ID))
+			i.snap.Players = sortPlayers(i.snap.Players, i.playerID)
 			now := time.Now()
 			name := samp.DecodeServerText(string(s.Encoding), info.Hostname)
 			if name == "" {
@@ -414,6 +417,7 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 				existing.Color = colorHex(p.Color)
 			}
 			i.snap.Players = upsertPlayer(i.snap.Players, existing)
+			i.snap.Players = sortPlayers(i.snap.Players, i.playerID)
 		case samp.EventPlayerQuit:
 			p := event.Data.(samp.PlayerEvent)
 			i.snap.Players = removePlayer(i.snap.Players, int(p.ID))
@@ -425,6 +429,7 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 				existing.Ping = int(p.Ping)
 				i.snap.Players = upsertPlayer(i.snap.Players, existing)
 			}
+			i.snap.Players = sortPlayers(i.snap.Players, i.playerID)
 		case samp.EventDialog:
 			d := event.Data.(samp.DialogEvent)
 			if d.ID < 0 {
@@ -482,6 +487,7 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 			}
 			player.Distance = distance(i.position, [3]float32{v.X, v.Y, v.Z})
 			i.snap.Players = upsertPlayer(i.snap.Players, player)
+			i.snap.Players = sortPlayers(i.snap.Players, i.playerID)
 			i.snap.NearbyPlayers = upsertPlayer(i.snap.NearbyPlayers, player)
 			sortNearby(i)
 		case samp.EventPosition:
@@ -518,6 +524,7 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 				i.position = [3]float32{v.X, v.Y, v.Z}
 			}
 			i.snap.Players = upsertPlayer(i.snap.Players, player)
+			i.snap.Players = sortPlayers(i.snap.Players, i.playerID)
 			recalculateNearby(i)
 		case samp.EventVehicleSync:
 			v := event.Data.(samp.VehicleEvent)
@@ -614,16 +621,15 @@ func removePlayer(v []domain.Player, id int) []domain.Player {
 	clear(v[len(out):])
 	return out
 }
-func movePlayerFirst(players []domain.Player, id int) []domain.Player {
-	for index := range players {
-		if players[index].ID != id || index == 0 {
-			continue
+func sortPlayers(players []domain.Player, localPlayerID int) []domain.Player {
+	sort.SliceStable(players, func(left, right int) bool {
+		leftIsLocal := players[left].ID == localPlayerID
+		rightIsLocal := players[right].ID == localPlayerID
+		if leftIsLocal != rightIsLocal {
+			return leftIsLocal
 		}
-		local := players[index]
-		copy(players[1:index+1], players[0:index])
-		players[0] = local
-		break
-	}
+		return players[left].ID < players[right].ID
+	})
 	return players
 }
 func findPlayer(v []domain.Player, id int) domain.Player {

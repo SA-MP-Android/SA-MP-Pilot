@@ -13,6 +13,7 @@ export const EVENT_CHAT_MESSAGE = 'chat.message'
 export const EVENT_CHAT_RESET = 'chat.reset'
 export const CHAT_PAGE_SIZE = 50
 export const MAX_CHAT_MESSAGES = 500
+export const TAB_CHAT = 'chat'
 export const STATUS_CONNECTED = 'connected'
 export const STATUS_CONNECTING = 'connecting'
 export const STATUS_ERROR = 'error'

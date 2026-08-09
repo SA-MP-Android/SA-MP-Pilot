@@ -39,6 +39,7 @@ const (
 	MaxObjects             = 1000
 	MaxTextDraws           = 2048
 	MaxDeferredDialogs     = 64
+	InvalidPlayerID        = -1
 	InvalidVehicleID       = -1
 )
 

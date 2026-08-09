@@ -85,10 +85,10 @@ func TestRawDialogListInputPreservesServerEncodingAndTableOrder(t *testing.T) {
 	}
 }
 
-func TestMovePlayerFirstPreservesOtherPlayerOrder(t *testing.T) {
-	players := []domain.Player{{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4}}
-	got := movePlayerFirst(players, 3)
-	want := []int{3, 1, 2, 4}
+func TestSortPlayersPlacesLocalPlayerFirstAndOthersByID(t *testing.T) {
+	players := []domain.Player{{ID: 8}, {ID: 3}, {ID: 7}, {ID: 2}}
+	got := sortPlayers(players, 3)
+	want := []int{3, 2, 7, 8}
 	for index, id := range want {
 		if got[index].ID != id {
 			t.Fatalf("players = %+v, want IDs %v", got, want)

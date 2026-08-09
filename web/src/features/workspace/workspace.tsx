@@ -21,6 +21,7 @@ import {
   STATUS_CONNECTED,
   STATUS_CONNECTING,
   STATUS_ERROR,
+  TAB_CHAT,
 } from '@/constants'
 import type { QuickCommand, Server, Snapshot } from '@/types'
 import { EntityGrid } from '@/components/entity-grid'
@@ -67,18 +68,19 @@ export function Workspace({
   const [commandText, setCommandText] = useState('')
   const [showPlayerColors, setShowPlayerColors] = useState(true)
   const [pendingCommandDelete, setPendingCommandDelete] = useState<QuickCommand | null>(null)
+  const [activeTab, setActiveTab] = useState(TAB_CHAT)
   const chatViewportRef = useRef<HTMLDivElement>(null)
   const followChatRef = useRef(true)
   const act = (action: string, data: unknown = {}) =>
     api.action(server.id, action, data).catch((error) => toast.error(error.message))
 
   useEffect(() => {
-    if (!followChatRef.current) return
+    if (activeTab !== TAB_CHAT || !followChatRef.current) return
     const frame = requestAnimationFrame(() => {
       if (chatViewportRef.current) chatViewportRef.current.scrollTop = chatViewportRef.current.scrollHeight
     })
     return () => cancelAnimationFrame(frame)
-  }, [value.chat])
+  }, [activeTab, value.chat])
   useEffect(() => {
     if (value.activeDialog) setEditing(false)
   }, [value.activeDialog])
@@ -150,9 +152,16 @@ export function Workspace({
         </div>
         {connection.error && <p className="w-full text-sm text-red-500">{connection.error}</p>}
       </CardHeader>
-      <Tabs defaultValue="chat" className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-5 pt-4">
+      <Tabs
+        value={activeTab}
+        onValueChange={(tab) => {
+          setActiveTab(tab)
+          if (tab === TAB_CHAT) followChatRef.current = true
+        }}
+        className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-5 pt-4"
+      >
         <TabsList className="w-fit shrink-0">
-          <TabsTrigger value="chat">
+          <TabsTrigger value={TAB_CHAT}>
             <MessageSquare size={14} />
             {t('tabs.chat')}
           </TabsTrigger>
@@ -174,7 +183,7 @@ export function Workspace({
           </TabsTrigger>
           <TabsTrigger value="controls">{t('tabs.controls')}</TabsTrigger>
         </TabsList>
-        <TabsContent value="chat" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+        <TabsContent value={TAB_CHAT} className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
           <ScrollArea
             viewportRef={chatViewportRef}
             onViewportScroll={(event) => {
