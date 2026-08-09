@@ -104,6 +104,7 @@ jobs:
             mkdir -p "${package}/web"
             cp -R web/dist "${package}/web/dist"
             cp README.md "${package}/README.md"
+            cp LICENSE NOTICE "${package}/"
             binary="sa-mp-pilot"
             if [ "${os}" = "windows" ]; then
               binary="sa-mp-pilot.exe"

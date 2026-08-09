@@ -40,3 +40,9 @@ The backend contains a pure-Go implementation of the legacy RakNet wire protocol
 The browser console supports multiple persisted instances, automatic connection, server configuration, chat and commands, reusable quick commands, player list and player clicks, Dialog responses and deferral, TextDraw display and clicks, nearby player/vehicle/object data, key masks, AFK mode, teleportation, and driver/passenger vehicle controls. Voice and audio streaming are intentionally excluded.
 
 Network input is decoded field-by-field rather than mapped to platform-native packed structures. Queues, reliable retries, ordered frames, split assemblies and payload sizes are bounded; connection work is cancellation-aware and uses one transport event loop per session.
+
+## License
+
+Copyright 2026 SA-MP Android.
+
+SA-MP-Pilot is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for attribution.
