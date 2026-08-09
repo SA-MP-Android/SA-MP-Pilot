@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/httpapi"
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/service"
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/store"
+	"github.com/SA-MP-Android/SA-MP-Pilot/internal/webassets"
 )
 
 var version = "dev"
@@ -31,9 +33,6 @@ func main() {
 	if *data == "" {
 		*data = runtimeDir
 	}
-	if *web == "" {
-		*web = filepath.Join(runtimeDir, "web", "dist")
-	}
 	st, e := store.Open(filepath.Join(*data, "data.json"))
 	if e != nil {
 		slog.Error("open store", "error", e)
@@ -48,7 +47,11 @@ func main() {
 	manager := service.New(st, service.WithLogDir(logDir))
 	manager.StartAutoConnect()
 	defer manager.Close()
-	srv := &http.Server{Addr: *addr, Handler: httpapi.New(manager, os.DirFS(*web), log), ReadHeaderTimeout: 5 * time.Second}
+	var assets fs.FS = webassets.FS
+	if *web != "" {
+		assets = os.DirFS(*web)
+	}
+	srv := &http.Server{Addr: *addr, Handler: httpapi.New(manager, assets, log), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		log.Info("SA-MP-Pilot listening", "version", version, "address", "http://"+*addr)
 		if e := srv.ListenAndServe(); e != nil && e != http.ErrServerClosed {

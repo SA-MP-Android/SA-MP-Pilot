@@ -20,7 +20,7 @@ go run ./cmd/sa-mp-pilot -data . -web web/dist
 
 Vite proxies `/api` to `127.0.0.1:8080`. By default, the Go service stores `data.json` beside the executable and writes isolated instance logs under the adjacent `logs` directory. Starting a new connection clears that instance's log. Override the bind address and data directory with `-addr` and `-data`.
 
-Release archives include the platform binary and the pre-built frontend. Extract the complete archive and run the binary from any working directory; it resolves the bundled `web/dist` directory relative to the executable. Tags beginning with `v` trigger cross-platform release builds and SHA-256 checksums.
+Release binaries embed the complete frontend and can be run directly from any working directory. Tags beginning with `v` trigger cross-platform single-binary releases and SHA-256 checksums. The `-web` option remains available for overriding embedded assets during development.
 
 ## Verification
 
@@ -31,7 +31,7 @@ make test
 make build
 ```
 
-The production build is written to `bin/sa-mp-pilot`; it serves the pre-built frontend from `web/dist`.
+The production build is written to `bin/sa-mp-pilot` with the frontend embedded in the executable.
 
 ## Protocol and features
 
