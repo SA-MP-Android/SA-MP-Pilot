@@ -9,7 +9,7 @@ import (
 
 func cloneSnapshot(source domain.Snapshot) domain.Snapshot {
 	result := source
-	result.Chat = slices.Clone(source.Chat)
+	result.Chat = nil
 	result.Players = slices.Clone(source.Players)
 	result.NearbyPlayers = slices.Clone(source.NearbyPlayers)
 	result.Vehicles = slices.Clone(source.Vehicles)

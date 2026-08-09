@@ -142,6 +142,48 @@ func TestReceiverOrdersAndReassembles(t *testing.T) {
 		t.Fatalf("unexpected split: %q", got)
 	}
 }
+
+func TestReceiverBoundsSplitAssembliesAndBytes(t *testing.T) {
+	state := newReceiverState()
+	now := time.Now()
+	for id := 0; id < maxSplitAssemblies+1; id++ {
+		frame := Frame{
+			Reliability: Reliable,
+			Split:       &Split{ID: uint16(id), Index: 0, Count: 2},
+			Payload:     []byte("part"),
+			PayloadBits: 32,
+		}
+		state.accept(frame, now)
+	}
+	if len(state.splits) != maxSplitAssemblies {
+		t.Fatalf("split assemblies = %d, want %d", len(state.splits), maxSplitAssemblies)
+	}
+	if state.splitBytes != maxSplitAssemblies*len("part") {
+		t.Fatalf("split bytes = %d", state.splitBytes)
+	}
+
+	oversized := newReceiverState()
+	frame := Frame{
+		Reliability: Reliable,
+		Split:       &Split{ID: 1, Index: 0, Count: 2},
+		Payload:     make([]byte, maxSplitAssemblyBytes+1),
+		PayloadBits: (maxSplitAssemblyBytes + 1) * 8,
+	}
+	oversized.accept(frame, now)
+	if len(oversized.splits) != 0 || oversized.splitBytes != 0 {
+		t.Fatalf("oversized split retained: assemblies=%d bytes=%d", len(oversized.splits), oversized.splitBytes)
+	}
+}
+
+func TestReceiverExpirationReleasesSplitBytes(t *testing.T) {
+	state := newReceiverState()
+	created := time.Now()
+	state.accept(Frame{Reliability: Reliable, Split: &Split{ID: 1, Index: 0, Count: 2}, Payload: []byte("part"), PayloadBits: 32}, created)
+	state.expire(created.Add(splitAssemblyTTL + time.Second))
+	if len(state.splits) != 0 || state.splitBytes != 0 {
+		t.Fatalf("expired split retained: assemblies=%d bytes=%d", len(state.splits), state.splitBytes)
+	}
+}
 func TestDeliverWaitsInsteadOfDroppingWhenInboundQueueIsFull(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

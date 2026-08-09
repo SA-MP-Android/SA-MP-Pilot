@@ -67,6 +67,28 @@ func TestRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestChatEndpointReturnsAnEmptyPage(t *testing.T) {
+	h := handler(t)
+	body := `{"host":"127.0.0.1","port":7777,"nickname":"web","password":"","encoding":"utf-8","autoConnect":false}`
+	r := httptest.NewRequest(http.MethodPost, "/api/instances", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	var created struct {
+		Server struct {
+			ID string `json:"id"`
+		} `json:"server"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	r = httptest.NewRequest(http.MethodGet, "/api/instances/"+created.Server.ID+"/chat?limit=50", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte(`"items":[]`)) {
+		t.Fatalf("chat %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestUpdateAndCommandLifecycle(t *testing.T) {
 	h := handler(t)
 	createBody := `{"host":"127.0.0.1","port":7777,"nickname":"web","password":"","encoding":"utf-8","autoConnect":false}`

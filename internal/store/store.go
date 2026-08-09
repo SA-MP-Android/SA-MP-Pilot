@@ -10,6 +10,8 @@ import (
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/domain"
 )
 
+const maxDataFileBytes int64 = 32 << 20
+
 type Data struct {
 	Servers  []domain.Server       `json:"servers"`
 	Commands []domain.QuickCommand `json:"commands"`
@@ -22,6 +24,13 @@ type Store struct {
 
 func Open(path string) (*Store, error) {
 	s := &Store{path: path, data: Data{Servers: []domain.Server{}, Commands: []domain.QuickCommand{}}}
+	info, err := os.Stat(path)
+	if err == nil && info.Size() > maxDataFileBytes {
+		return nil, errors.New("store: data file is too large")
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil

@@ -92,8 +92,18 @@ export interface Snapshot {
   afk: boolean
   spawned: boolean
 }
+export interface ChatMessage {
+  id: number
+  text: string
+  color: string
+  at: string
+}
+export interface ChatPage {
+  items: ChatMessage[]
+  nextBefore?: number
+}
 export interface Event {
   type: string
   instanceId: string
-  data?: Snapshot
+  data?: Snapshot | ChatMessage
 }

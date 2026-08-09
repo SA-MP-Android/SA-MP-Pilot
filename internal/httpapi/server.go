@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/domain"
@@ -27,6 +28,7 @@ func New(m *service.Manager, assets fs.FS, log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /api/instances", s.list)
 	mux.HandleFunc("POST /api/instances", s.create)
 	mux.HandleFunc("GET /api/instances/{id}", s.get)
+	mux.HandleFunc("GET /api/instances/{id}/chat", s.chat)
 	mux.HandleFunc("PUT /api/instances/{id}", s.update)
 	mux.HandleFunc("DELETE /api/instances/{id}", s.remove)
 	mux.HandleFunc("POST /api/instances/{id}/commands", s.addCommand)
@@ -37,6 +39,38 @@ func New(m *service.Manager, assets fs.FS, log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.Handle("/", spa(assets))
 	return security(mux)
+}
+func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
+	before, err := parseOptionalInt64(r.URL.Query().Get("before"))
+	if err != nil {
+		problem(w, http.StatusBadRequest, "invalid before cursor")
+		return
+	}
+	limit, err := parseOptionalInt(r.URL.Query().Get("limit"))
+	if err != nil {
+		problem(w, http.StatusBadRequest, "invalid limit")
+		return
+	}
+	page, err := s.manager.Chat(r.PathValue("id"), before, limit)
+	if err != nil {
+		problem(w, http.StatusNotFound, err.Error())
+		return
+	}
+	write(w, http.StatusOK, page)
+}
+
+func parseOptionalInt(value string) (int, error) {
+	if value == "" {
+		return 0, nil
+	}
+	return strconv.Atoi(value)
+}
+
+func parseOptionalInt64(value string) (int64, error) {
+	if value == "" {
+		return 0, nil
+	}
+	return strconv.ParseInt(value, 10, 64)
 }
 func (s *Server) list(w http.ResponseWriter, _ *http.Request) { write(w, 200, s.manager.List()) }
 func (s *Server) get(w http.ResponseWriter, r *http.Request) {
@@ -127,18 +161,32 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(202)
 }
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
+	stateEvents, chatEvents, done, err := s.manager.Subscribe()
+	if err != nil {
+		problem(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	defer done()
 	c, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return
 	}
 	defer c.CloseNow()
-	ch, done := s.manager.Subscribe()
-	defer done()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case e := <-ch:
+		case e, ok := <-stateEvents:
+			if !ok {
+				return
+			}
+			if err = c.Write(r.Context(), websocket.MessageText, mustJSON(e)); err != nil {
+				return
+			}
+		case e, ok := <-chatEvents:
+			if !ok {
+				return
+			}
 			if err = c.Write(r.Context(), websocket.MessageText, mustJSON(e)); err != nil {
 				return
 			}

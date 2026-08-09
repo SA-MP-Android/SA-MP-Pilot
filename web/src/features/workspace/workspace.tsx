@@ -48,7 +48,15 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ServerForm } from '@/features/instances/server-form'
 
-export function Workspace({ value, onDelete }: { value: Snapshot; onDelete: () => void }) {
+export function Workspace({
+  value,
+  onDelete,
+  onLoadOlderChat,
+}: {
+  value: Snapshot
+  onDelete: () => void
+  onLoadOlderChat?: () => void
+}) {
   const { t } = useTranslation()
   const server = value.server
   const connection = value.connection
@@ -171,6 +179,7 @@ export function Workspace({ value, onDelete }: { value: Snapshot; onDelete: () =
             viewportRef={chatViewportRef}
             onViewportScroll={(event) => {
               const viewport = event.currentTarget
+              if (viewport.scrollTop <= CHAT_BOTTOM_TOLERANCE_PX) onLoadOlderChat?.()
               followChatRef.current =
                 viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= CHAT_BOTTOM_TOLERANCE_PX
             }}

@@ -10,6 +10,7 @@ import (
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/store"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -146,12 +147,81 @@ func TestSnapshotDoesNotShareMutableState(t *testing.T) {
 		ActiveDialog: &domain.Dialog{Title: "original", RawMessage: []byte("original")},
 	}}
 	snapshot := i.snapshot()
-	snapshot.Chat[0].Text = "changed"
+	if snapshot.Chat != nil {
+		t.Fatal("published snapshots must not include chat history")
+	}
 	snapshot.Commands[0].Label = "changed"
 	snapshot.ActiveDialog.Title = "changed"
 	snapshot.ActiveDialog.RawMessage[0] = 'X'
 	if i.snap.Chat[0].Text != "original" || i.snap.Commands[0].Label != "original" || i.snap.ActiveDialog.Title != "original" || string(i.snap.ActiveDialog.RawMessage) != "original" {
 		t.Fatal("snapshot shares mutable state with the live instance")
+	}
+}
+
+func TestEntityCollectionsStopAtProtocolLimits(t *testing.T) {
+	players := make([]domain.Player, domain.MaxPlayers)
+	vehicles := make([]domain.Vehicle, domain.MaxVehicles)
+	objects := make([]domain.Object, domain.MaxObjects)
+	textDraws := make([]domain.TextDraw, domain.MaxTextDraws)
+	if got := upsertPlayer(players, domain.Player{ID: domain.MaxPlayers + 1}); len(got) != domain.MaxPlayers {
+		t.Fatalf("players grew to %d", len(got))
+	}
+	if got := upsertVehicle(vehicles, domain.Vehicle{ID: domain.MaxVehicles + 1}); len(got) != domain.MaxVehicles {
+		t.Fatalf("vehicles grew to %d", len(got))
+	}
+	if got := upsertObject(objects, domain.Object{ID: domain.MaxObjects + 1}); len(got) != domain.MaxObjects {
+		t.Fatalf("objects grew to %d", len(got))
+	}
+	if got := upsertTextDraw(textDraws, domain.TextDraw{ID: domain.MaxTextDraws + 1}); len(got) != domain.MaxTextDraws {
+		t.Fatalf("text draws grew to %d", len(got))
+	}
+}
+
+func TestSubscriberLimitAndCleanup(t *testing.T) {
+	m := newManager(t)
+	cleanups := make([]func(), 0, maxSubscribers)
+	for range maxSubscribers {
+		_, _, cleanup, err := m.Subscribe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cleanups = append(cleanups, cleanup)
+	}
+	if _, _, _, err := m.Subscribe(); err == nil {
+		t.Fatal("subscriber limit was not enforced")
+	}
+	cleanups[0]()
+	_, _, cleanup, err := m.Subscribe()
+	if err != nil {
+		t.Fatalf("released subscriber slot was not reusable: %v", err)
+	}
+	cleanup()
+	for _, release := range cleanups[1:] {
+		release()
+	}
+}
+
+func TestChatEventsHaveAnIndependentQueue(t *testing.T) {
+	m := newManager(t)
+	stateEvents, chatEvents, cleanup, err := m.Subscribe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	for range stateEventQueueSize + 1 {
+		m.emit(domain.Event{Type: domain.EventInstanceUpdated})
+	}
+	m.emit(domain.Event{Type: domain.EventChatMessage})
+	select {
+	case event := <-chatEvents:
+		if event.Type != domain.EventChatMessage {
+			t.Fatalf("unexpected chat event: %+v", event)
+		}
+	default:
+		t.Fatal("chat event was blocked by state events")
+	}
+	if len(stateEvents) != stateEventQueueSize {
+		t.Fatalf("state queue size = %d", len(stateEvents))
 	}
 }
 func TestCreateValidatesInput(t *testing.T) {
@@ -202,5 +272,52 @@ func TestInstanceLogsAreIsolatedAndResetOnConnect(t *testing.T) {
 	}
 	if len(cleared) != 0 {
 		t.Fatalf("reset log contains %d bytes", len(cleared))
+	}
+}
+
+func TestChatLogPaginationReadsNewestFirstWithoutLoadingWholeFile(t *testing.T) {
+	logDir := filepath.Join(t.TempDir(), "logs")
+	m := newManager(t)
+	m.logDir = logDir
+	snapshot, err := m.Create(domain.Server{Host: "127.0.0.1", Port: 7777, Nickname: "test", Encoding: domain.EncodingUTF8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	i, _ := m.find(snapshot.Server.ID)
+	for index := 1; index <= 5; index++ {
+		m.appendChat(i, fmt.Sprintf("message %d", index), defaultChatColor)
+	}
+	page, err := m.Chat(snapshot.Server.ID, 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 2 || page.Items[0].Text != "message 4" || page.Items[1].Text != "message 5" || page.NextBefore == 0 {
+		t.Fatalf("unexpected first page: %+v", page)
+	}
+	page, err = m.Chat(snapshot.Server.ID, page.NextBefore, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 2 || page.Items[0].Text != "message 2" || page.Items[1].Text != "message 3" {
+		t.Fatalf("unexpected second page: %+v", page)
+	}
+	for index := 6; index <= 80; index++ {
+		m.appendChat(i, fmt.Sprintf("message %d %s", index, strings.Repeat("x", 96)), defaultChatColor)
+	}
+	before := int64(0)
+	count := 0
+	for {
+		page, err = m.Chat(snapshot.Server.ID, before, 7)
+		if err != nil {
+			t.Fatal(err)
+		}
+		count += len(page.Items)
+		if page.NextBefore == 0 {
+			break
+		}
+		before = page.NextBefore
+	}
+	if count != 80 {
+		t.Fatalf("paginated message count = %d", count)
 	}
 }

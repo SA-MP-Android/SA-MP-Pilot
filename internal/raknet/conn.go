@@ -40,6 +40,9 @@ const (
 	maxPendingReliable                   = 1024
 	maxReceivedWindow                    = 4096
 	maxOrderedFrames                     = 1024
+	maxSplitAssemblies                   = 64
+	maxSplitAssemblyBytes                = 1 << 20
+	maxSplitBufferedBytes                = 4 << 20
 	maxResendAttempts                    = 20
 	splitAssemblyTTL                     = 10 * time.Second
 )
@@ -72,6 +75,7 @@ type splitAssembly struct {
 	parts   map[uint32]Frame
 	count   uint32
 	created time.Time
+	bytes   int
 }
 type receiverState struct {
 	splits       map[uint16]*splitAssembly
@@ -80,6 +84,7 @@ type receiverState struct {
 	sequenced    [maxOrderingChannel + 1]uint16
 	sequencedSet [maxOrderingChannel + 1]bool
 	orderedCount int
+	splitBytes   int
 }
 
 func newReceiverState() *receiverState { return &receiverState{splits: map[uint16]*splitAssembly{}} }
@@ -190,7 +195,10 @@ func (c *Conn) WriteChannel(ctx context.Context, payload []byte, reliability Rel
 }
 func (c *Conn) Read(ctx context.Context) ([]byte, error) {
 	select {
-	case p := <-c.recv:
+	case p, ok := <-c.recv:
+		if !ok {
+			return nil, c.closeReason()
+		}
 		return p, nil
 	case <-c.done:
 		return nil, c.closeReason()
@@ -414,19 +422,31 @@ func (s *receiverState) accept(f Frame, now time.Time) [][]byte {
 	if f.Split != nil {
 		a := s.splits[f.Split.ID]
 		if a == nil {
+			if len(s.splits) >= maxSplitAssemblies {
+				return nil
+			}
 			a = &splitAssembly{parts: map[uint32]Frame{}, count: f.Split.Count, created: now}
 			s.splits[f.Split.ID] = a
 		}
 		if a.count != f.Split.Count {
 			return nil
 		}
-		a.parts[f.Split.Index] = f
+		if _, duplicate := a.parts[f.Split.Index]; !duplicate {
+			partBytes := len(f.Payload)
+			if a.bytes+partBytes > maxSplitAssemblyBytes || s.splitBytes+partBytes > maxSplitBufferedBytes {
+				s.dropSplit(f.Split.ID)
+				return nil
+			}
+			a.parts[f.Split.Index] = f
+			a.bytes += partBytes
+			s.splitBytes += partBytes
+		}
 		if uint32(len(a.parts)) != a.count {
 			return nil
 		}
 		combined := f
 		combined.Split = nil
-		combined.Payload = nil
+		combined.Payload = make([]byte, 0, a.bytes)
 		combined.PayloadBits = 0
 		for index := uint32(0); index < a.count; index++ {
 			part, ok := a.parts[index]
@@ -436,7 +456,7 @@ func (s *receiverState) accept(f Frame, now time.Time) [][]byte {
 			combined.Payload = append(combined.Payload, part.Payload...)
 			combined.PayloadBits += part.PayloadBits
 		}
-		delete(s.splits, f.Split.ID)
+		s.dropSplit(f.Split.ID)
 		f = combined
 	}
 	channel := int(f.OrderingChannel)
@@ -481,8 +501,17 @@ func (s *receiverState) accept(f Frame, now time.Time) [][]byte {
 func (s *receiverState) expire(now time.Time) {
 	for id, a := range s.splits {
 		if now.Sub(a.created) > splitAssemblyTTL {
-			delete(s.splits, id)
+			s.dropSplit(id)
 		}
 	}
+}
+
+func (s *receiverState) dropSplit(id uint16) {
+	assembly, ok := s.splits[id]
+	if !ok {
+		return
+	}
+	s.splitBytes -= assembly.bytes
+	delete(s.splits, id)
 }
 func sequenceNewer(value, reference uint16) bool { return int16(value-reference) > 0 }

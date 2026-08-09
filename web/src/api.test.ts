@@ -51,15 +51,22 @@ describe('api', () => {
   })
 
   it('replaces an instance delivered by both create and websocket events', () => {
-    const first = { server: { id: 'same-instance' } } as Snapshot
-    const latest = { server: { id: 'same-instance' } } as Snapshot
+    const first = { server: { id: 'same-instance' }, chat: [] } as unknown as Snapshot
+    const latest = { server: { id: 'same-instance' }, chat: [] } as unknown as Snapshot
     expect(upsertSnapshot([first], latest)).toEqual([latest])
   })
 
   it('updates an instance without changing list order', () => {
-    const first = { server: { id: 'first' } } as Snapshot
-    const second = { server: { id: 'second' } } as Snapshot
-    const updatedFirst = { server: { id: 'first' } } as Snapshot
+    const first = { server: { id: 'first' }, chat: [] } as unknown as Snapshot
+    const second = { server: { id: 'second' }, chat: [] } as unknown as Snapshot
+    const updatedFirst = { server: { id: 'first' }, chat: [] } as unknown as Snapshot
     expect(upsertSnapshot([first, second], updatedFirst)).toEqual([updatedFirst, second])
+  })
+
+  it('preserves chat when a websocket snapshot omits chat history', () => {
+    const chat = [{ id: 1, text: 'hello', color: '#ffffffff', at: new Date().toISOString() }]
+    const current = { server: { id: 'instance' }, chat } as unknown as Snapshot
+    const update = { server: { id: 'instance' }, chat: [] } as unknown as Snapshot
+    expect(upsertSnapshot([current], update)[0].chat).toEqual(chat)
   })
 })

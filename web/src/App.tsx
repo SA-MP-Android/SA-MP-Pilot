@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { ChevronRight, Globe2, Plus, Radio, Telescope } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -10,12 +10,15 @@ import {
   DEFAULT_NICKNAME,
   DEFAULT_PORT,
   EVENT_INSTANCE_DELETED,
+  EVENT_CHAT_MESSAGE,
+  EVENT_CHAT_RESET,
+  MAX_CHAT_MESSAGES,
   STATUS_CONNECTED,
   STATUS_ERROR,
 } from '@/constants'
 import { changeLanguage, supportedLanguages } from '@/i18n'
 import type { SupportedLanguage } from '@/i18n'
-import type { Server, Snapshot } from '@/types'
+import type { ChatMessage, Server, Snapshot } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Card, CardDescription, CardHeader } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -41,6 +44,8 @@ export default function App() {
   const [selected, setSelected] = useState('')
   const [adding, setAdding] = useState(false)
   const [form, setForm] = useState(defaultServer)
+  const chatBefore = useRef<Record<string, number | undefined>>({})
+  const loadingChat = useRef(new Set<string>())
   const current = useMemo(() => items.find((item) => item.server.id === selected), [items, selected])
 
   useEffect(() => {
@@ -54,11 +59,55 @@ export default function App() {
     return events((event) => {
       if (event.type === EVENT_INSTANCE_DELETED) {
         setItems((value) => value.filter((item) => item.server.id !== event.instanceId))
+      } else if (event.type === EVENT_CHAT_RESET) {
+        chatBefore.current[event.instanceId] = undefined
+        setItems((value) =>
+          value.map((item) => (item.server.id === event.instanceId ? { ...item, chat: [] } : item)),
+        )
+      } else if (event.type === EVENT_CHAT_MESSAGE && event.data) {
+        const message = event.data as ChatMessage
+        setItems((value) =>
+          value.map((item) =>
+            item.server.id === event.instanceId && !item.chat.some((entry) => entry.id === message.id)
+              ? { ...item, chat: [...item.chat, message].slice(-MAX_CHAT_MESSAGES) }
+              : item,
+          ),
+        )
       } else if (event.data) {
-        setItems((value) => upsertSnapshot(value, event.data!))
+        setItems((value) => upsertSnapshot(value, event.data as Snapshot))
       }
     })
   }, [])
+
+  const loadChat = useCallback(async (id: string, older = false) => {
+    if (loadingChat.current.has(id)) return
+    const before = older ? chatBefore.current[id] : undefined
+    if (older && !before) return
+    loadingChat.current.add(id)
+    try {
+      const page = await api.chat(id, before)
+      setItems((value) =>
+        value.map((item) => {
+          if (item.server.id !== id) return item
+          const messages = new Map(item.chat.map((message) => [message.id, message]))
+          page.items.forEach((message) => messages.set(message.id, message))
+          return {
+            ...item,
+            chat: [...messages.values()].sort((a, b) => a.id - b.id).slice(-MAX_CHAT_MESSAGES),
+          }
+        }),
+      )
+      chatBefore.current[id] = page.nextBefore
+    } catch (error) {
+      toast.error((error as Error).message)
+    } finally {
+      loadingChat.current.delete(id)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (selected) void loadChat(selected)
+  }, [selected, loadChat])
 
   async function create(event: FormEvent) {
     event.preventDefault()
@@ -139,6 +188,7 @@ export default function App() {
             <Workspace
               key={current.server.id}
               value={current}
+              onLoadOlderChat={() => void loadChat(current.server.id, true)}
               onDelete={async () => {
                 await api.remove(current.server.id)
                 setSelected('')

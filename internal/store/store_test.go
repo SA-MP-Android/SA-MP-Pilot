@@ -2,6 +2,7 @@ package store
 
 import (
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/domain"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -35,6 +36,24 @@ func TestStoreRollback(t *testing.T) {
 	}
 	if len(s.Data().Servers) != 0 {
 		t.Fatal("mutated after failed update")
+	}
+}
+
+func TestOpenRejectsOversizedDataFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = file.Truncate(maxDataFileBytes + 1); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err = file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Open(path); err == nil {
+		t.Fatal("oversized data file was accepted")
 	}
 }
 

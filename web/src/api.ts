@@ -1,5 +1,6 @@
 import { API_PREFIX, EVENTS_PATH, RECONNECT_INITIAL_MS, RECONNECT_MAX_MS } from './constants'
-import type { Event, QuickCommand, Server, Snapshot } from './types'
+import { CHAT_PAGE_SIZE, EVENT_CHAT_MESSAGE } from './constants'
+import type { ChatPage, Event, QuickCommand, Server, Snapshot } from './types'
 
 const JSON_CONTENT_TYPE = 'application/json'
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -31,7 +32,11 @@ export function normalizeSnapshot(value: Snapshot): Snapshot {
 export function upsertSnapshot(items: Snapshot[], snapshot: Snapshot): Snapshot[] {
   const index = items.findIndex((item) => item.server.id === snapshot.server.id)
   if (index < 0) return [...items, snapshot]
-  return items.map((item, itemIndex) => (itemIndex === index ? snapshot : item))
+  return items.map((item, itemIndex) =>
+    itemIndex === index
+      ? { ...snapshot, chat: (snapshot.chat?.length ?? 0) > 0 ? snapshot.chat : (item.chat ?? []) }
+      : item,
+  )
 }
 export const api = {
   list: () => request<Snapshot[] | null>('/instances').then((items) => (items ?? []).map(normalizeSnapshot)),
@@ -48,6 +53,11 @@ export const api = {
     request<void>(`${instancePath(id)}/commands/${commandId}`, { method: 'DELETE' }),
   connect: (id: string) => request<void>(`${instancePath(id)}/connect`, { method: 'POST' }),
   disconnect: (id: string) => request<void>(`${instancePath(id)}/disconnect`, { method: 'POST' }),
+  chat: (id: string, before?: number) => {
+    const query = new URLSearchParams({ limit: String(CHAT_PAGE_SIZE) })
+    if (before) query.set('before', String(before))
+    return request<ChatPage>(`${instancePath(id)}/chat?${query}`)
+  },
   action: (id: string, action: string, data: unknown = {}) =>
     request<void>(`${instancePath(id)}/actions/${action}`, { method: 'POST', body: JSON.stringify(data) }),
 }
@@ -60,7 +70,11 @@ export function events(onEvent: (event: Event) => void) {
     socket = new WebSocket(`${protocol}://${location.host}${API_PREFIX}${EVENTS_PATH}`)
     socket.onmessage = (message) => {
       const event = JSON.parse(message.data) as Event
-      onEvent(event.data ? { ...event, data: normalizeSnapshot(event.data) } : event)
+      onEvent(
+        event.data && event.type !== EVENT_CHAT_MESSAGE
+          ? { ...event, data: normalizeSnapshot(event.data as Snapshot) }
+          : event,
+      )
     }
     socket.onopen = () => {
       retry = RECONNECT_INITIAL_MS

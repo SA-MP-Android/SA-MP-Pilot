@@ -28,6 +28,14 @@ const (
 	dialogStyleList           = 2
 	dialogStyleTabList        = 4
 	dialogStyleTabListHeaders = 5
+	maxSubscribers            = 16
+	stateEventQueueSize       = 2
+	chatEventQueueSize        = 64
+	maxHostBytes              = 253
+	maxNicknameBytes          = 96
+	maxPasswordBytes          = 128
+	maxCommandLabelBytes      = 128
+	maxCommandTextBytes       = 1024
 )
 
 type instance struct {
@@ -37,11 +45,15 @@ type instance struct {
 	client   *samp.Client
 	position [3]float32
 }
+type subscriber struct {
+	state chan domain.Event
+	chat  chan domain.Event
+}
 type Manager struct {
 	mu          sync.RWMutex
 	instances   map[string]*instance
 	store       *store.Store
-	subscribers map[chan domain.Event]struct{}
+	subscribers map[*subscriber]struct{}
 	msgID       atomic.Int64
 	logDir      string
 }
@@ -53,15 +65,18 @@ func WithLogDir(path string) Option {
 }
 
 func New(st *store.Store, options ...Option) *Manager {
-	m := &Manager{instances: map[string]*instance{}, store: st, subscribers: map[chan domain.Event]struct{}{}}
+	m := &Manager{instances: map[string]*instance{}, store: st, subscribers: map[*subscriber]struct{}{}}
 	for _, option := range options {
 		option(m)
 	}
 	data := st.Data()
 	for _, s := range data.Servers {
+		if len(m.instances) >= domain.MaxInstances {
+			break
+		}
 		i := newInstance(s)
 		for _, command := range data.Commands {
-			if command.ServerID == s.ID {
+			if command.ServerID == s.ID && len(i.snap.Commands) < domain.MaxCommandsPerInstance {
 				i.snap.Commands = append(i.snap.Commands, command)
 			}
 		}
@@ -99,8 +114,8 @@ func (m *Manager) Update(id string, s domain.Server) (domain.Snapshot, error) {
 	if !ok {
 		return domain.Snapshot{}, errors.New("instance not found")
 	}
-	if s.Host == "" || s.Nickname == "" || s.Port < 1 || s.Port > 65535 {
-		return domain.Snapshot{}, errors.New("host, nickname and a valid port are required")
+	if err := validateServer(s); err != nil {
+		return domain.Snapshot{}, err
 	}
 	s.ID = id
 	if err := m.store.Update(func(d *store.Data) error {
@@ -130,14 +145,23 @@ func (m *Manager) AddCommand(id string, command domain.QuickCommand) (domain.Qui
 	if command.Label == "" || command.Command == "" {
 		return domain.QuickCommand{}, errors.New("label and command are required")
 	}
-	command.ID, command.ServerID = uuid.NewString(), id
-	if err := m.store.Update(func(d *store.Data) error { d.Commands = append(d.Commands, command); return nil }); err != nil {
-		return domain.QuickCommand{}, err
+	if len(command.Label) > maxCommandLabelBytes || len(command.Command) > maxCommandTextBytes {
+		return domain.QuickCommand{}, errors.New("command is too long")
 	}
 	i.mu.Lock()
+	if len(i.snap.Commands) >= domain.MaxCommandsPerInstance {
+		i.mu.Unlock()
+		return domain.QuickCommand{}, errors.New("command limit reached")
+	}
+	command.ID, command.ServerID = uuid.NewString(), id
+	if err := m.store.Update(func(d *store.Data) error { d.Commands = append(d.Commands, command); return nil }); err != nil {
+		i.mu.Unlock()
+		return domain.QuickCommand{}, err
+	}
 	i.snap.Commands = append(i.snap.Commands, command)
+	snapshot := cloneSnapshot(i.snap)
 	i.mu.Unlock()
-	m.publish(id, i)
+	m.emit(domain.Event{Type: domain.EventInstanceUpdated, InstanceID: id, Data: snapshot})
 	return command, nil
 }
 func (m *Manager) DeleteCommand(id, commandID string) error {
@@ -202,8 +226,13 @@ func (i *instance) snapshot() domain.Snapshot {
 	return cloneSnapshot(i.snap)
 }
 func (m *Manager) Create(s domain.Server) (domain.Snapshot, error) {
-	if s.Host == "" || s.Nickname == "" || s.Port < 1 || s.Port > 65535 {
-		return domain.Snapshot{}, errors.New("host, nickname and a valid port are required")
+	if err := validateServer(s); err != nil {
+		return domain.Snapshot{}, err
+	}
+	m.mu.Lock()
+	if len(m.instances) >= domain.MaxInstances {
+		m.mu.Unlock()
+		return domain.Snapshot{}, errors.New("instance limit reached")
 	}
 	s.ID = uuid.NewString()
 	if s.Encoding == "" {
@@ -211,13 +240,24 @@ func (m *Manager) Create(s domain.Server) (domain.Snapshot, error) {
 	}
 	i := newInstance(s)
 	if err := m.store.Update(func(d *store.Data) error { d.Servers = append(d.Servers, s); return nil }); err != nil {
+		m.mu.Unlock()
 		return domain.Snapshot{}, err
 	}
-	m.mu.Lock()
 	m.instances[s.ID] = i
 	m.mu.Unlock()
-	m.emit(domain.Event{Type: domain.EventInstanceCreated, InstanceID: s.ID, Data: i.snapshot()})
-	return i.snapshot(), nil
+	snapshot := i.snapshot()
+	m.emit(domain.Event{Type: domain.EventInstanceCreated, InstanceID: s.ID, Data: snapshot})
+	return snapshot, nil
+}
+
+func validateServer(server domain.Server) error {
+	if server.Host == "" || server.Nickname == "" || server.Port < 1 || server.Port > 65535 {
+		return errors.New("host, nickname and a valid port are required")
+	}
+	if len(server.Host) > maxHostBytes || len(server.Nickname) > maxNicknameBytes || len(server.Password) > maxPasswordBytes {
+		return errors.New("server configuration is too long")
+	}
+	return nil
 }
 func (m *Manager) Delete(id string) error {
 	m.mu.Lock()
@@ -254,6 +294,7 @@ func filterServers(v []domain.Server, id string) []domain.Server {
 			o = append(o, x)
 		}
 	}
+	clear(v[len(o):])
 	return o
 }
 func filterCommands(v []domain.QuickCommand, id string) []domain.QuickCommand {
@@ -263,6 +304,7 @@ func filterCommands(v []domain.QuickCommand, id string) []domain.QuickCommand {
 			o = append(o, x)
 		}
 	}
+	clear(v[len(o):])
 	return o
 }
 func (m *Manager) Connect(id string) error {
@@ -273,6 +315,11 @@ func (m *Manager) Connect(id string) error {
 	if err := m.resetInstanceLog(id); err != nil {
 		return fmt.Errorf("reset instance log: %w", err)
 	}
+	i.mu.Lock()
+	clear(i.snap.Chat)
+	i.snap.Chat = i.snap.Chat[:0]
+	i.mu.Unlock()
+	m.emit(domain.Event{Type: domain.EventChatReset, InstanceID: id})
 	i.mu.Lock()
 	if i.cancel != nil {
 		i.cancel()
@@ -333,6 +380,7 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 	var disconnectErr error
 	for event := range client.Events() {
 		i.mu.Lock()
+		publishSnapshot := true
 		switch event.Type {
 		case samp.EventJoined:
 			localPlayer := event.Data.(samp.PlayerEvent)
@@ -357,6 +405,7 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 				color = fmt.Sprintf("#%08x", chat.Color)
 			}
 			m.appendChat(i, text, color)
+			publishSnapshot = false
 		case samp.EventPlayerJoin:
 			p := event.Data.(samp.PlayerEvent)
 			existing := findPlayer(i.snap.Players, int(p.ID))
@@ -386,6 +435,7 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 			}
 		case samp.EventProtocolError:
 			m.appendChat(i, fmt.Sprintf("Protocol error: %v", event.Data), "#ff6b6b")
+			publishSnapshot = false
 		case samp.EventTextDrawShow:
 			v := event.Data.(samp.TextDrawEvent)
 			i.snap.TextDraws = upsertTextDraw(i.snap.TextDraws, domain.TextDraw{ID: int(v.ID), Text: v.Text, Style: int(v.Style), LetterColor: colorHex(v.LetterColor), BoxColor: colorHex(v.BoxColor), BackgroundColor: colorHex(v.BackgroundColor), Selectable: v.Selectable != 0, X: v.X, Y: v.Y, LetterWidth: v.LetterWidth, LetterHeight: v.LetterHeight})
@@ -485,7 +535,9 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 			}
 		}
 		i.mu.Unlock()
-		m.publish(id, i)
+		if publishSnapshot {
+			m.publish(id, i)
+		}
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -529,10 +581,15 @@ func connectionMessage(err error) string {
 }
 func (m *Manager) appendChat(i *instance, text, color string) {
 	now := time.Now()
-	i.snap.Chat = append(i.snap.Chat, domain.ChatMessage{ID: m.msgID.Add(1), Text: text, Color: color, At: now})
-	m.writeInstanceLog(i.snap.Server.ID, text, color, now)
+	message := domain.ChatMessage{ID: m.msgID.Add(1), Text: text, Color: color, At: now}
+	i.snap.Chat = append(i.snap.Chat, message)
+	m.writeInstanceLog(i.snap.Server.ID, message)
+	m.emit(domain.Event{Type: domain.EventChatMessage, InstanceID: i.snap.Server.ID, Data: message})
 	if len(i.snap.Chat) > domain.MaxChatMessages {
-		i.snap.Chat = i.snap.Chat[len(i.snap.Chat)-domain.MaxChatMessages:]
+		dropped := len(i.snap.Chat) - domain.MaxChatMessages
+		copy(i.snap.Chat, i.snap.Chat[dropped:])
+		clear(i.snap.Chat[domain.MaxChatMessages:])
+		i.snap.Chat = i.snap.Chat[:domain.MaxChatMessages]
 	}
 }
 func upsertPlayer(v []domain.Player, p domain.Player) []domain.Player {
@@ -541,6 +598,9 @@ func upsertPlayer(v []domain.Player, p domain.Player) []domain.Player {
 			v[x] = p
 			return v
 		}
+	}
+	if len(v) >= domain.MaxPlayers {
+		return v
 	}
 	return append(v, p)
 }
@@ -551,6 +611,7 @@ func removePlayer(v []domain.Player, id int) []domain.Player {
 			out = append(out, p)
 		}
 	}
+	clear(v[len(out):])
 	return out
 }
 func movePlayerFirst(players []domain.Player, id int) []domain.Player {
@@ -589,6 +650,9 @@ func upsertTextDraw(v []domain.TextDraw, item domain.TextDraw) []domain.TextDraw
 			return v
 		}
 	}
+	if len(v) >= domain.MaxTextDraws {
+		return v
+	}
 	return append(v, item)
 }
 func removeTextDraw(v []domain.TextDraw, id int) []domain.TextDraw {
@@ -598,6 +662,7 @@ func removeTextDraw(v []domain.TextDraw, id int) []domain.TextDraw {
 			out = append(out, item)
 		}
 	}
+	clear(v[len(out):])
 	return out
 }
 func upsertObject(v []domain.Object, item domain.Object) []domain.Object {
@@ -606,6 +671,9 @@ func upsertObject(v []domain.Object, item domain.Object) []domain.Object {
 			v[x] = item
 			return v
 		}
+	}
+	if len(v) >= domain.MaxObjects {
+		return v
 	}
 	return append(v, item)
 }
@@ -616,6 +684,7 @@ func removeObject(v []domain.Object, id int) []domain.Object {
 			out = append(out, item)
 		}
 	}
+	clear(v[len(out):])
 	return out
 }
 func upsertVehicle(v []domain.Vehicle, item domain.Vehicle) []domain.Vehicle {
@@ -624,6 +693,9 @@ func upsertVehicle(v []domain.Vehicle, item domain.Vehicle) []domain.Vehicle {
 			v[x] = item
 			return v
 		}
+	}
+	if len(v) >= domain.MaxVehicles {
+		return v
 	}
 	return append(v, item)
 }
@@ -634,6 +706,7 @@ func removeVehicle(v []domain.Vehicle, id int) []domain.Vehicle {
 			out = append(out, item)
 		}
 	}
+	clear(v[len(out):])
 	return out
 }
 func findVehicle(v []domain.Vehicle, id int) domain.Vehicle {
@@ -817,6 +890,12 @@ func (m *Manager) Action(id, action string, p map[string]any) error {
 	case domain.ActionDeferDialog:
 		if i.snap.ActiveDialog != nil {
 			i.snap.Dialogs = append(i.snap.Dialogs, *i.snap.ActiveDialog)
+			if len(i.snap.Dialogs) > domain.MaxDeferredDialogs {
+				dropped := len(i.snap.Dialogs) - domain.MaxDeferredDialogs
+				copy(i.snap.Dialogs, i.snap.Dialogs[dropped:])
+				clear(i.snap.Dialogs[domain.MaxDeferredDialogs:])
+				i.snap.Dialogs = i.snap.Dialogs[:domain.MaxDeferredDialogs]
+			}
 			i.snap.ActiveDialog = nil
 		}
 	case domain.ActionShowDialog:
@@ -824,7 +903,9 @@ func (m *Manager) Action(id, action string, p map[string]any) error {
 		for index, dialog := range i.snap.Dialogs {
 			if dialog.ID == dialogID {
 				i.snap.ActiveDialog = &dialog
-				i.snap.Dialogs = append(i.snap.Dialogs[:index], i.snap.Dialogs[index+1:]...)
+				copy(i.snap.Dialogs[index:], i.snap.Dialogs[index+1:])
+				clear(i.snap.Dialogs[len(i.snap.Dialogs)-1:])
+				i.snap.Dialogs = i.snap.Dialogs[:len(i.snap.Dialogs)-1]
 				break
 			}
 		}
@@ -836,13 +917,14 @@ func (m *Manager) Action(id, action string, p map[string]any) error {
 				dialogs = append(dialogs, dialog)
 			}
 		}
+		clear(i.snap.Dialogs[len(dialogs):])
 		i.snap.Dialogs = dialogs
 	default:
 		i.mu.Unlock()
 		return errors.New("unknown action")
 	}
 	i.mu.Unlock()
-	go m.publish(id, i)
+	m.publish(id, i)
 	return nil
 }
 func number(v any) float64 { n, _ := v.(float64); return n }
@@ -858,17 +940,32 @@ func (m *Manager) publish(id string, i *instance) {
 func (m *Manager) emit(e domain.Event) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	for ch := range m.subscribers {
+	for subscription := range m.subscribers {
+		ch := subscription.state
+		if e.Type == domain.EventChatMessage || e.Type == domain.EventChatReset {
+			ch = subscription.chat
+		}
 		select {
 		case ch <- e:
 		default:
 		}
 	}
 }
-func (m *Manager) Subscribe() (chan domain.Event, func()) {
-	ch := make(chan domain.Event, 32)
+func (m *Manager) Subscribe() (<-chan domain.Event, <-chan domain.Event, func(), error) {
 	m.mu.Lock()
-	m.subscribers[ch] = struct{}{}
+	if len(m.subscribers) >= maxSubscribers {
+		m.mu.Unlock()
+		return nil, nil, nil, errors.New("subscriber limit reached")
+	}
+	subscription := &subscriber{state: make(chan domain.Event, stateEventQueueSize), chat: make(chan domain.Event, chatEventQueueSize)}
+	m.subscribers[subscription] = struct{}{}
 	m.mu.Unlock()
-	return ch, func() { m.mu.Lock(); delete(m.subscribers, ch); close(ch); m.mu.Unlock() }
+	cleanup := func() {
+		m.mu.Lock()
+		delete(m.subscribers, subscription)
+		close(subscription.state)
+		close(subscription.chat)
+		m.mu.Unlock()
+	}
+	return subscription.state, subscription.chat, cleanup, nil
 }
