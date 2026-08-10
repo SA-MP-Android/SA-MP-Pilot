@@ -70,6 +70,30 @@ func TestRecalculateNearbyUsesCurrentPositionAndSorts(t *testing.T) {
 	}
 }
 
+func TestPlayerQuitRemovesPlayerFromAllLists(t *testing.T) {
+	i := &instance{snap: domain.Snapshot{
+		Players:       []domain.Player{{ID: 1}, {ID: 2}},
+		NearbyPlayers: []domain.Player{{ID: 1}, {ID: 2}},
+	}}
+	removePlayerFromSnapshot(i, 1)
+	players := i.snap.Players
+	nearbyPlayers := i.snap.NearbyPlayers
+	vehicles := removeVehicle([]domain.Vehicle{{ID: 1}, {ID: 2}}, 1)
+	objects := removeObject([]domain.Object{{ID: 1}, {ID: 2}}, 1)
+	if len(players) != 1 || players[0].ID != 2 {
+		t.Fatalf("players after removal = %+v", players)
+	}
+	if len(nearbyPlayers) != 1 || nearbyPlayers[0].ID != 2 {
+		t.Fatalf("nearby players after removal = %+v", nearbyPlayers)
+	}
+	if len(vehicles) != 1 || vehicles[0].ID != 2 {
+		t.Fatalf("vehicles after removal = %+v", vehicles)
+	}
+	if len(objects) != 1 || objects[0].ID != 2 {
+		t.Fatalf("objects after removal = %+v", objects)
+	}
+}
+
 func TestRawDialogListInputPreservesServerEncodingAndTableOrder(t *testing.T) {
 	dialog := &domain.Dialog{
 		Style:      dialogStyleTabListHeaders,

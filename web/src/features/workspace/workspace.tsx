@@ -49,6 +49,13 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ServerForm } from '@/features/instances/server-form'
 
+function visiblePlayerColor(color: string | undefined) {
+  if (!color) return undefined
+  const match = /^#([0-9a-f]{6})([0-9a-f]{2})?$/i.exec(color)
+  if (!match || match[1] === '000000' || match[2] === '00') return undefined
+  return color
+}
+
 export function Workspace({
   value,
   onDelete,
@@ -93,10 +100,64 @@ export function Workspace({
         ? `${t(value.vehicleState.passenger ? 'status.passenger' : 'status.driver')} · ${t('status.vehicle', { id: value.vehicleState.vehicleId })}`
         : t('status.onFoot')
 
+  const playerTable = (
+    <div className="rounded-lg border">
+      <Table className="min-w-175">
+        <TableHeader>
+          <TableRow>
+            <TableHead>ID</TableHead>
+            <TableHead>{t('players.player')}</TableHead>
+            <TableHead>{t('players.score')}</TableHead>
+            <TableHead>{t('players.skin')}</TableHead>
+            <TableHead>{t('players.ping')}</TableHead>
+            <TableHead className="text-right">{t('players.actions')}</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {value.players.length ? (
+            value.players.map((player) => (
+              <TableRow key={player.id}>
+                <TableCell>{player.id}</TableCell>
+                <TableCell
+                  className="font-medium"
+                  style={showPlayerColors ? { color: visiblePlayerColor(player.color) } : undefined}
+                >
+                  {player.name || `Player #${player.id}`}
+                </TableCell>
+                <TableCell>{player.score}</TableCell>
+                <TableCell>{player.skin}</TableCell>
+                <TableCell>
+                  {player.ping === INVALID_PLAYER_PING || player.ping === INVALID_PLAYER_PING_SIGNED
+                    ? '—'
+                    : `${player.ping} ms`}
+                </TableCell>
+                <TableCell className="text-right">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => act(ACTION_CLICK_PLAYER, { playerId: player.id })}
+                  >
+                    {t('common.select')}
+                  </Button>
+                </TableCell>
+              </TableRow>
+            ))
+          ) : (
+            <TableRow>
+              <TableCell colSpan={6} className="text-muted-foreground h-40 text-center">
+                {t('players.empty')}
+              </TableCell>
+            </TableRow>
+          )}
+        </TableBody>
+      </Table>
+    </div>
+  )
+
   return (
-    <Card className="flex h-[calc(100dvh-8.5rem)] min-h-144 min-w-0 flex-col overflow-hidden shadow-lg">
-      <CardHeader className="flex-row flex-wrap items-center gap-3 space-y-0 border-b p-5">
-        <div>
+    <Card className="flex h-[calc(100dvh-7rem)] min-h-0 min-w-0 flex-col overflow-hidden shadow-lg sm:h-[calc(100dvh-8.5rem)] sm:min-h-144">
+      <CardHeader className="flex-row flex-wrap items-center gap-3 space-y-0 border-b p-3 sm:p-5">
+        <div className="min-w-0">
           <CardTitle>{connection.serverName || `${server.host}:${server.port}`}</CardTitle>
           <CardDescription>
             {server.host}:{server.port} · {server.nickname}
@@ -120,7 +181,7 @@ export function Workspace({
           </Badge>
         )}
         {connection.status === STATUS_CONNECTED && <Badge variant="secondary">{stateLabel}</Badge>}
-        <div className="ml-auto flex gap-2">
+        <div className="flex w-full flex-wrap gap-2 sm:ml-auto sm:w-auto sm:flex-nowrap">
           <Button variant="outline" onClick={() => setEditing(true)}>
             <Settings size={15} />
             {t('common.settings')}
@@ -158,9 +219,9 @@ export function Workspace({
           setActiveTab(tab)
           if (tab === TAB_CHAT) followChatRef.current = true
         }}
-        className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-5 pt-4"
+        className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-3 pt-3 sm:p-5 sm:pt-4"
       >
-        <TabsList className="w-fit shrink-0">
+        <TabsList className="h-auto w-full shrink-0 flex-wrap justify-start gap-1">
           <TabsTrigger value={TAB_CHAT}>
             <MessageSquare size={14} />
             {t('tabs.chat')}
@@ -224,7 +285,7 @@ export function Workspace({
             />
             <Button disabled={connection.status !== STATUS_CONNECTED}>{t('common.send')}</Button>
           </form>
-          <div className="mt-3 flex flex-wrap gap-2">
+          <div className="mt-3 flex max-h-20 flex-wrap gap-2 overflow-y-auto sm:max-h-none">
             {value.commands
               .filter((command) => command.serverId === server.id)
               .map((command) => (
@@ -250,7 +311,7 @@ export function Workspace({
               ))}
           </div>
           <form
-            className="mt-3 grid min-w-0 gap-2 p-px sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto]"
+            className="mt-3 grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2 p-px sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto]"
             onSubmit={async (event) => {
               event.preventDefault()
               try {
@@ -359,59 +420,8 @@ export function Workspace({
             />
             {t('players.showColors')}
           </Label>
-          <ScrollArea className="min-h-0 flex-1 pr-3">
-            <div className="overflow-hidden rounded-lg border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>ID</TableHead>
-                    <TableHead>{t('players.player')}</TableHead>
-                    <TableHead>{t('players.score')}</TableHead>
-                    <TableHead>{t('players.skin')}</TableHead>
-                    <TableHead>{t('players.ping')}</TableHead>
-                    <TableHead className="text-right">{t('players.actions')}</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {value.players.length ? (
-                    value.players.map((player) => (
-                      <TableRow key={player.id}>
-                        <TableCell>{player.id}</TableCell>
-                        <TableCell
-                          className="font-medium"
-                          style={showPlayerColors && player.color ? { color: player.color } : undefined}
-                        >
-                          {player.name || `Player #${player.id}`}
-                        </TableCell>
-                        <TableCell>{player.score}</TableCell>
-                        <TableCell>{player.skin}</TableCell>
-                        <TableCell>
-                          {player.ping === INVALID_PLAYER_PING || player.ping === INVALID_PLAYER_PING_SIGNED
-                            ? '—'
-                            : `${player.ping} ms`}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => act(ACTION_CLICK_PLAYER, { playerId: player.id })}
-                          >
-                            {t('common.select')}
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    ))
-                  ) : (
-                    <TableRow>
-                      <TableCell colSpan={6} className="text-muted-foreground h-40 text-center">
-                        {t('players.empty')}
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </div>
-          </ScrollArea>
+          <div className="min-h-0 flex-1 overflow-y-auto pr-3 sm:hidden">{playerTable}</div>
+          <ScrollArea className="hidden min-h-0 flex-1 pr-3 sm:block">{playerTable}</ScrollArea>
         </TabsContent>
         <TabsContent value="nearby" className="mt-0 min-h-0 flex-1 overflow-hidden">
           <ScrollArea className="h-full pr-3">

@@ -35,7 +35,7 @@ export function ServerForm({
           onChange={(event) => onChange({ ...value, host: event.target.value })}
         />
       </Label>
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid gap-3 sm:grid-cols-2">
         <Label className="block space-y-2">
           {t('server.port')}
           <Input
@@ -87,7 +87,7 @@ export function ServerForm({
           {t('server.autoConnect')}
         </Label>
       )}
-      <div className="flex justify-end gap-2">
+      <div className="flex flex-wrap justify-end gap-2">
         <Button type="button" variant="ghost" onClick={onCancel}>
           {t('common.cancel')}
         </Button>

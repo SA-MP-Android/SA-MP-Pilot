@@ -420,7 +420,7 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 			i.snap.Players = sortPlayers(i.snap.Players, i.playerID)
 		case samp.EventPlayerQuit:
 			p := event.Data.(samp.PlayerEvent)
-			i.snap.Players = removePlayer(i.snap.Players, int(p.ID))
+			removePlayerFromSnapshot(i, int(p.ID))
 		case samp.EventScores:
 			for _, p := range event.Data.([]samp.PlayerEvent) {
 				existing := findPlayer(i.snap.Players, int(p.ID))
@@ -620,6 +620,10 @@ func removePlayer(v []domain.Player, id int) []domain.Player {
 	}
 	clear(v[len(out):])
 	return out
+}
+func removePlayerFromSnapshot(i *instance, id int) {
+	i.snap.Players = removePlayer(i.snap.Players, id)
+	i.snap.NearbyPlayers = removePlayer(i.snap.NearbyPlayers, id)
 }
 func sortPlayers(players []domain.Player, localPlayerID int) []domain.Player {
 	sort.SliceStable(players, func(left, right int) bool {

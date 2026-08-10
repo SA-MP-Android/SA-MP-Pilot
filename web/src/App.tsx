@@ -126,8 +126,8 @@ export default function App() {
   return (
     <div className="from-background via-background to-muted/30 text-foreground min-h-screen bg-linear-to-br">
       <Toaster richColors />
-      <header className="bg-background/80 sticky top-0 z-30 border-b px-6 py-4 backdrop-blur-xl">
-        <div className="mx-auto flex max-w-375 items-center gap-3">
+      <header className="bg-background/80 sticky top-0 z-30 border-b px-3 py-3 backdrop-blur-xl sm:px-6 sm:py-4">
+        <div className="mx-auto flex max-w-375 flex-wrap items-center gap-3">
           <Radio className="text-primary" />
           <div>
             <h1 className="font-semibold tracking-wide">SA-MP-Pilot</h1>
@@ -139,7 +139,7 @@ export default function App() {
               value={i18n.resolvedLanguage ?? 'en'}
               onValueChange={(language) => void changeLanguage(language as SupportedLanguage)}
             >
-              <SelectTrigger className="w-36" aria-label={t('language.label')}>
+              <SelectTrigger className="w-24 sm:w-36" aria-label={t('language.label')}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -150,15 +150,33 @@ export default function App() {
                 ))}
               </SelectContent>
             </Select>
-            <Button onClick={() => setAdding(true)}>
+            <Button className="px-2 sm:px-4" onClick={() => setAdding(true)}>
               <Plus size={16} />
               {t('app.newInstance')}
             </Button>
           </div>
         </div>
       </header>
-      <main className="mx-auto flex max-w-375 flex-col gap-8 p-6 lg:flex-row lg:items-start lg:gap-10">
-        <aside className="w-full shrink-0 space-y-4 lg:w-75">
+      <main className="mx-auto flex max-w-375 flex-col gap-5 p-3 sm:gap-8 sm:p-6 lg:flex-row lg:items-start lg:gap-10">
+        <div className="lg:hidden">
+          {items.length ? (
+            <Select value={selected} onValueChange={setSelected}>
+              <SelectTrigger className="w-full" aria-label={t('app.selectInstance')}>
+                <SelectValue placeholder={t('app.selectInstance')} />
+              </SelectTrigger>
+              <SelectContent>
+                {items.map((snapshot) => (
+                  <SelectItem key={snapshot.server.id} value={snapshot.server.id}>
+                    {snapshot.connection.serverName || `${snapshot.server.host}:${snapshot.server.port}`}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : (
+            <Card className="text-muted-foreground p-4 text-center text-sm">{t('app.empty')}</Card>
+          )}
+        </div>
+        <aside className="hidden w-full shrink-0 space-y-4 lg:block lg:w-75">
           {items.map((snapshot) => (
             <Card
               key={snapshot.server.id}
