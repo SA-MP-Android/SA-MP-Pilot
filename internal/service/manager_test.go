@@ -94,17 +94,31 @@ func TestPlayerQuitRemovesPlayerFromAllLists(t *testing.T) {
 	}
 }
 
-func TestClearDialogsRemovesActiveAndDeferredDialogs(t *testing.T) {
+func TestResetConnectionStateClearsTransientInstanceData(t *testing.T) {
 	i := &instance{snap: domain.Snapshot{
-		ActiveDialog: &domain.Dialog{ID: 1, Title: "active"},
-		Dialogs:      []domain.Dialog{{ID: 2, Title: "deferred"}},
+		Players:       []domain.Player{{ID: 1}},
+		NearbyPlayers: []domain.Player{{ID: 2}},
+		Vehicles:      []domain.Vehicle{{ID: 3}},
+		Objects:       []domain.Object{{ID: 4}},
+		TextDraws:     []domain.TextDraw{{ID: 5}},
+		ActiveDialog:  &domain.Dialog{ID: 1, Title: "active"},
+		Dialogs:       []domain.Dialog{{ID: 2, Title: "deferred"}},
+		VehicleState:  domain.VehicleState{InVehicle: true, Passenger: true, VehicleID: 6},
+		KeyMask:       7,
+		AFK:           true,
+		Spawned:       true,
 	}}
-	clearDialogs(i)
-	if i.snap.ActiveDialog != nil {
-		t.Fatalf("active dialog = %+v, want nil", i.snap.ActiveDialog)
+	i.position = [3]float32{1, 2, 3}
+	i.playerID = 8
+	resetConnectionState(i)
+	if len(i.snap.Players) != 0 || len(i.snap.NearbyPlayers) != 0 || len(i.snap.Vehicles) != 0 || len(i.snap.Objects) != 0 || len(i.snap.TextDraws) != 0 || i.snap.ActiveDialog != nil || len(i.snap.Dialogs) != 0 {
+		t.Fatalf("transient collections were not cleared: %+v", i.snap)
 	}
-	if len(i.snap.Dialogs) != 0 {
-		t.Fatalf("deferred dialogs = %+v, want empty", i.snap.Dialogs)
+	if i.snap.VehicleState.VehicleID != domain.InvalidVehicleID || i.snap.KeyMask != 0 || i.snap.AFK || i.snap.Spawned {
+		t.Fatalf("transient state was not reset: %+v", i.snap)
+	}
+	if i.position != [3]float32{} || i.playerID != domain.InvalidPlayerID {
+		t.Fatalf("local connection state was not reset: position=%v playerID=%d", i.position, i.playerID)
 	}
 }
 

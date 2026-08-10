@@ -328,9 +328,7 @@ func (m *Manager) Connect(id string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	i.cancel = cancel
 	i.snap.Connection = domain.Connection{Status: domain.StatusConnecting}
-	i.snap.Spawned = false
-	i.playerID = domain.InvalidPlayerID
-	clearDialogs(i)
+	resetConnectionState(i)
 	s := i.snap.Server
 	m.appendChat(i, fmt.Sprintf("Connecting to %s:%d...", s.Host, s.Port), defaultChatColor)
 	i.mu.Unlock()
@@ -539,7 +537,7 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 			i.client = nil
 			if ctx.Err() == nil {
 				i.snap.Connection = domain.Connection{Status: domain.StatusDisconnected}
-				clearDialogs(i)
+				resetConnectionState(i)
 				disconnectErr, _ = event.Data.(error)
 			}
 		}
@@ -627,10 +625,26 @@ func removePlayerFromSnapshot(i *instance, id int) {
 	i.snap.Players = removePlayer(i.snap.Players, id)
 	i.snap.NearbyPlayers = removePlayer(i.snap.NearbyPlayers, id)
 }
-func clearDialogs(i *instance) {
+func resetConnectionState(i *instance) {
+	clear(i.snap.Players)
+	i.snap.Players = i.snap.Players[:0]
+	clear(i.snap.NearbyPlayers)
+	i.snap.NearbyPlayers = i.snap.NearbyPlayers[:0]
+	clear(i.snap.Vehicles)
+	i.snap.Vehicles = i.snap.Vehicles[:0]
+	clear(i.snap.Objects)
+	i.snap.Objects = i.snap.Objects[:0]
+	clear(i.snap.TextDraws)
+	i.snap.TextDraws = i.snap.TextDraws[:0]
 	i.snap.ActiveDialog = nil
 	clear(i.snap.Dialogs)
 	i.snap.Dialogs = i.snap.Dialogs[:0]
+	i.snap.VehicleState = domain.VehicleState{VehicleID: domain.InvalidVehicleID}
+	i.snap.KeyMask = 0
+	i.snap.AFK = false
+	i.snap.Spawned = false
+	i.position = [3]float32{}
+	i.playerID = domain.InvalidPlayerID
 }
 func sortPlayers(players []domain.Player, localPlayerID int) []domain.Player {
 	sort.SliceStable(players, func(left, right int) bool {
@@ -781,7 +795,7 @@ func (m *Manager) Disconnect(id string) error {
 		i.client = nil
 	}
 	i.snap.Connection = domain.Connection{Status: domain.StatusDisconnected}
-	clearDialogs(i)
+	resetConnectionState(i)
 	i.mu.Unlock()
 	m.publish(id, i)
 	return nil
