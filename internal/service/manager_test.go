@@ -94,6 +94,20 @@ func TestPlayerQuitRemovesPlayerFromAllLists(t *testing.T) {
 	}
 }
 
+func TestClearDialogsRemovesActiveAndDeferredDialogs(t *testing.T) {
+	i := &instance{snap: domain.Snapshot{
+		ActiveDialog: &domain.Dialog{ID: 1, Title: "active"},
+		Dialogs:      []domain.Dialog{{ID: 2, Title: "deferred"}},
+	}}
+	clearDialogs(i)
+	if i.snap.ActiveDialog != nil {
+		t.Fatalf("active dialog = %+v, want nil", i.snap.ActiveDialog)
+	}
+	if len(i.snap.Dialogs) != 0 {
+		t.Fatalf("deferred dialogs = %+v, want empty", i.snap.Dialogs)
+	}
+}
+
 func TestRawDialogListInputPreservesServerEncodingAndTableOrder(t *testing.T) {
 	dialog := &domain.Dialog{
 		Style:      dialogStyleTabListHeaders,

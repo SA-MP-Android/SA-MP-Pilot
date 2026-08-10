@@ -330,6 +330,7 @@ func (m *Manager) Connect(id string) error {
 	i.snap.Connection = domain.Connection{Status: domain.StatusConnecting}
 	i.snap.Spawned = false
 	i.playerID = domain.InvalidPlayerID
+	clearDialogs(i)
 	s := i.snap.Server
 	m.appendChat(i, fmt.Sprintf("Connecting to %s:%d...", s.Host, s.Port), defaultChatColor)
 	i.mu.Unlock()
@@ -538,6 +539,7 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 			i.client = nil
 			if ctx.Err() == nil {
 				i.snap.Connection = domain.Connection{Status: domain.StatusDisconnected}
+				clearDialogs(i)
 				disconnectErr, _ = event.Data.(error)
 			}
 		}
@@ -624,6 +626,11 @@ func removePlayer(v []domain.Player, id int) []domain.Player {
 func removePlayerFromSnapshot(i *instance, id int) {
 	i.snap.Players = removePlayer(i.snap.Players, id)
 	i.snap.NearbyPlayers = removePlayer(i.snap.NearbyPlayers, id)
+}
+func clearDialogs(i *instance) {
+	i.snap.ActiveDialog = nil
+	clear(i.snap.Dialogs)
+	i.snap.Dialogs = i.snap.Dialogs[:0]
 }
 func sortPlayers(players []domain.Player, localPlayerID int) []domain.Player {
 	sort.SliceStable(players, func(left, right int) bool {
@@ -774,6 +781,7 @@ func (m *Manager) Disconnect(id string) error {
 		i.client = nil
 	}
 	i.snap.Connection = domain.Connection{Status: domain.StatusDisconnected}
+	clearDialogs(i)
 	i.mu.Unlock()
 	m.publish(id, i)
 	return nil
