@@ -4,21 +4,18 @@ import { ChevronRight, Globe2, Plus, Radio, Telescope } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Toaster, toast } from 'sonner'
 import '@/i18n'
-import { api, events, upsertSnapshot } from '@/api'
+import { api, events } from '@/api'
 import {
   DEFAULT_HOST,
   DEFAULT_NICKNAME,
   DEFAULT_PORT,
-  EVENT_INSTANCE_DELETED,
-  EVENT_CHAT_MESSAGE,
-  EVENT_CHAT_RESET,
   MAX_CHAT_MESSAGES,
   STATUS_CONNECTED,
   STATUS_ERROR,
 } from '@/constants'
 import { changeLanguage, supportedLanguages } from '@/i18n'
 import type { SupportedLanguage } from '@/i18n'
-import type { ChatMessage, Server, Snapshot } from '@/types'
+import type { Server, Snapshot } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Card, CardDescription, CardHeader } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -26,6 +23,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { ServerDialog } from '@/features/dialogs/server-dialog'
 import { ServerForm } from '@/features/instances/server-form'
 import { Workspace } from '@/features/workspace/workspace'
+import { InstanceSyncController } from '@/lib/instance-sync'
 
 const defaultServer: Omit<Server, 'id'> = {
   host: DEFAULT_HOST,
@@ -46,38 +44,35 @@ export default function App() {
   const [form, setForm] = useState(defaultServer)
   const chatBefore = useRef<Record<string, number | undefined>>({})
   const loadingChat = useRef(new Set<string>())
+  const sync = useRef<InstanceSyncController | null>(null)
   const current = useMemo(() => items.find((item) => item.server.id === selected), [items, selected])
 
   useEffect(() => {
-    api
-      .list()
-      .then((snapshots) => {
-        setItems(snapshots)
-        setSelected((value) => value || snapshots[0]?.server.id || '')
-      })
-      .catch((error) => toast.error(error.message))
-    return events((event) => {
-      if (event.type === EVENT_INSTANCE_DELETED) {
-        setItems((value) => value.filter((item) => item.server.id !== event.instanceId))
-      } else if (event.type === EVENT_CHAT_RESET) {
-        chatBefore.current[event.instanceId] = undefined
-        setItems((value) =>
-          value.map((item) => (item.server.id === event.instanceId ? { ...item, chat: [] } : item)),
-        )
-      } else if (event.type === EVENT_CHAT_MESSAGE && event.data) {
-        const message = event.data as ChatMessage
-        setItems((value) =>
-          value.map((item) =>
-            item.server.id === event.instanceId && !item.chat.some((entry) => entry.id === message.id)
-              ? { ...item, chat: [...item.chat, message].slice(-MAX_CHAT_MESSAGES) }
-              : item,
-          ),
-        )
-      } else if (event.data) {
-        setItems((value) => upsertSnapshot(value, event.data as Snapshot))
-      }
-    })
+    const controller = new InstanceSyncController(
+      { list: api.list, get: api.get },
+      setItems,
+      (error) => toast.error(error.message),
+      (id) => {
+        chatBefore.current[id] = undefined
+      },
+    )
+    sync.current = controller
+    void controller.reconcile()
+    const stop = events(
+      (event) => controller.handle(event),
+      () => void controller.reconcile(),
+    )
+    return () => {
+      stop()
+      controller.dispose()
+      if (sync.current === controller) sync.current = null
+    }
   }, [])
+
+  useEffect(() => {
+    if (items.some((item) => item.server.id === selected)) return
+    setSelected(items[0]?.server.id ?? '')
+  }, [items, selected])
 
   const loadChat = useCallback(async (id: string, older = false) => {
     if (loadingChat.current.has(id)) return
@@ -86,17 +81,14 @@ export default function App() {
     loadingChat.current.add(id)
     try {
       const page = await api.chat(id, before)
-      setItems((value) =>
-        value.map((item) => {
-          if (item.server.id !== id) return item
-          const messages = new Map(item.chat.map((message) => [message.id, message]))
-          page.items.forEach((message) => messages.set(message.id, message))
-          return {
-            ...item,
-            chat: [...messages.values()].sort((a, b) => a.id - b.id).slice(-MAX_CHAT_MESSAGES),
-          }
-        }),
-      )
+      sync.current?.update(id, (item) => {
+        const messages = new Map(item.chat.map((message) => [message.id, message]))
+        page.items.forEach((message) => messages.set(message.id, message))
+        return {
+          ...item,
+          chat: [...messages.values()].sort((a, b) => a.id - b.id).slice(-MAX_CHAT_MESSAGES),
+        }
+      })
       chatBefore.current[id] = page.nextBefore
     } catch (error) {
       toast.error((error as Error).message)
@@ -113,7 +105,7 @@ export default function App() {
     event.preventDefault()
     try {
       const snapshot = await api.create(form)
-      setItems((value) => upsertSnapshot(value, snapshot))
+      sync.current?.acceptSnapshot(snapshot)
       setSelected(snapshot.server.id)
       setAdding(false)
       setForm(defaultServer)

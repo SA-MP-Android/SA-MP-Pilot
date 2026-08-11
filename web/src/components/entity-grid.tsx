@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import type { ReactNode } from 'react'
 
 export interface EntityGridRow {
@@ -7,7 +8,13 @@ export interface EntityGridRow {
   actions?: ReactNode
 }
 
-export function EntityGrid({ rows, empty }: { rows: EntityGridRow[]; empty: string }) {
+export const EntityGrid = memo(function EntityGrid({
+  rows,
+  empty,
+}: {
+  rows: EntityGridRow[]
+  empty: string
+}) {
   if (!rows.length) {
     return <div className="text-muted-foreground grid h-52 place-content-center text-sm">{empty}</div>
   }
@@ -28,4 +35,4 @@ export function EntityGrid({ rows, empty }: { rows: EntityGridRow[]; empty: stri
       ))}
     </div>
   )
-}
+})

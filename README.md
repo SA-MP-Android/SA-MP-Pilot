@@ -41,6 +41,10 @@ The browser console supports multiple persisted instances, automatic connection,
 
 Network input is decoded field-by-field rather than mapped to platform-native packed structures. Queues, reliable retries, ordered frames, split assemblies and payload sizes are bounded; connection work is cancellation-aware and uses one transport event loop per session.
 
+### Instance synchronization
+
+`GET /api/instances` and `GET /api/instances/{id}` provide complete snapshots for bootstrap and recovery. WebSocket `instance.created` events also contain a complete snapshot. Thereafter, `instance.updated` carries an `InstancePatch`: a `syncEpoch`, a monotonically increasing `revision` within that epoch, and `replace` operations for only the changed top-level fields. Clients apply a patch only when its epoch matches and its revision immediately follows their local snapshot; on a gap they fetch `GET /api/instances/{id}` again. A full snapshot from a new epoch is authoritative, which allows a connected browser to recover after the service restarts. This keeps the lossy, bounded WebSocket state queue safe while avoiding repeated transmission of unrelated instance collections.
+
 ## License
 
 Copyright 2026 SA-MP Android.

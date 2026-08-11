@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Activity, Car, MessageSquare, PanelsTopLeft, Settings, Trash2, Users } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -8,11 +8,9 @@ import {
   ACTION_CHAT,
   ACTION_CLICK_PLAYER,
   ACTION_DISMISS_DIALOG,
-  ACTION_ENTER_VEHICLE,
   ACTION_EXIT_VEHICLE,
   ACTION_KEYS,
   ACTION_SHOW_DIALOG,
-  ACTION_TELEPORT,
   ACTION_TEXT_DRAW,
   CHAT_BOTTOM_TOLERANCE_PX,
   INVALID_PLAYER_PING,
@@ -48,6 +46,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ServerForm } from '@/features/instances/server-form'
+import { NearbyTab } from '@/features/workspace/nearby-tab'
 
 function visiblePlayerColor(color: string | undefined) {
   if (!color) return undefined
@@ -78,8 +77,11 @@ export function Workspace({
   const [activeTab, setActiveTab] = useState(TAB_CHAT)
   const chatViewportRef = useRef<HTMLDivElement>(null)
   const followChatRef = useRef(true)
-  const act = (action: string, data: unknown = {}) =>
-    api.action(server.id, action, data).catch((error) => toast.error(error.message))
+  const act = useCallback(
+    (action: string, data: unknown = {}) =>
+      api.action(server.id, action, data).catch((error) => toast.error(error.message)),
+    [server.id],
+  )
 
   useEffect(() => {
     if (activeTab !== TAB_CHAT || !followChatRef.current) return
@@ -424,72 +426,12 @@ export function Workspace({
           <ScrollArea className="hidden min-h-0 flex-1 pr-3 sm:block">{playerTable}</ScrollArea>
         </TabsContent>
         <TabsContent value="nearby" className="mt-0 min-h-0 flex-1 overflow-hidden">
-          <ScrollArea className="h-full pr-3">
-            <div className="grid gap-3 md:grid-cols-3">
-              <EntityGrid
-                empty={t('nearby.playersEmpty')}
-                rows={value.nearbyPlayers.map((entry) => ({
-                  id: entry.id,
-                  title: entry.name,
-                  subtitle: t('nearby.playerDetails', {
-                    distance: entry.distance.toFixed(1),
-                    health: entry.health,
-                    skin: entry.skin,
-                  }),
-                  actions: (
-                    <Button variant="outline" onClick={() => act(ACTION_TELEPORT, entry)}>
-                      {t('common.teleport')}
-                    </Button>
-                  ),
-                }))}
-              />
-              <EntityGrid
-                empty={t('nearby.vehiclesEmpty')}
-                rows={value.vehicles.map((entry) => ({
-                  id: entry.id,
-                  title: t('nearby.vehicle', { id: entry.id }),
-                  subtitle: t('nearby.modelDistance', {
-                    model: entry.modelId,
-                    distance: entry.distance.toFixed(1),
-                  }),
-                  actions: (
-                    <>
-                      <Button variant="outline" onClick={() => act(ACTION_TELEPORT, entry)}>
-                        {t('common.teleport')}
-                      </Button>
-                      <Button
-                        onClick={() => act(ACTION_ENTER_VEHICLE, { vehicleId: entry.id, passenger: false })}
-                      >
-                        {t('nearby.drive')}
-                      </Button>
-                      <Button
-                        variant="secondary"
-                        onClick={() => act(ACTION_ENTER_VEHICLE, { vehicleId: entry.id, passenger: true })}
-                      >
-                        {t('nearby.passenger')}
-                      </Button>
-                    </>
-                  ),
-                }))}
-              />
-              <EntityGrid
-                empty={t('nearby.objectsEmpty')}
-                rows={value.objects.map((entry) => ({
-                  id: entry.id,
-                  title: t('nearby.object', { id: entry.id }),
-                  subtitle: t('nearby.modelDistance', {
-                    model: entry.modelId,
-                    distance: entry.distance.toFixed(1),
-                  }),
-                  actions: (
-                    <Button variant="outline" onClick={() => act(ACTION_TELEPORT, entry)}>
-                      {t('common.teleport')}
-                    </Button>
-                  ),
-                }))}
-              />
-            </div>
-          </ScrollArea>
+          <NearbyTab
+            players={value.nearbyPlayers}
+            vehicles={value.vehicles}
+            objects={value.objects}
+            act={act}
+          />
         </TabsContent>
         <TabsContent value="controls" className="mt-0 min-h-0 flex-1 overflow-auto">
           <div className="space-y-5">

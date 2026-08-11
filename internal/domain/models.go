@@ -136,6 +136,13 @@ type VehicleState struct {
 	VehicleID int  `json:"vehicleId"`
 }
 type Snapshot struct {
+	// Revision is incremented for every state update. Clients use it to detect
+	// dropped incremental events and re-fetch a complete snapshot when needed.
+	Revision uint64 `json:"revision"`
+	// SyncEpoch identifies the manager process that produced the snapshot. A
+	// revision is only meaningful within one epoch because revisions restart
+	// when the process is restarted.
+	SyncEpoch     string         `json:"syncEpoch"`
 	Server        Server         `json:"server"`
 	Connection    Connection     `json:"connection"`
 	Chat          []ChatMessage  `json:"-"`
@@ -151,6 +158,21 @@ type Snapshot struct {
 	KeyMask       int            `json:"keyMask"`
 	AFK           bool           `json:"afk"`
 	Spawned       bool           `json:"spawned"`
+}
+
+// InstancePatch is the incremental form of an instance update. Each operation
+// replaces one top-level Snapshot field, allowing the model to grow without
+// changing the event envelope.
+type InstancePatch struct {
+	Revision   uint64           `json:"revision"`
+	SyncEpoch  string           `json:"syncEpoch"`
+	Operations []PatchOperation `json:"operations"`
+}
+
+type PatchOperation struct {
+	Op    string `json:"op"`
+	Path  string `json:"path"`
+	Value any    `json:"value"`
 }
 
 type ChatPage struct {

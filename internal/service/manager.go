@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +20,12 @@ import (
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/store"
 	"github.com/google/uuid"
 )
+
+// statePublishInterval is the minimum gap between state patches that carry
+// movement-heavy data (player/vehicle sync, positions). Rapid sync events are
+// coalesced by publishWorker into a single patch, cutting websocket traffic and
+// slowing the nearby tab without delaying chat or dialogs.
+var statePublishInterval = 500 * time.Millisecond
 
 const (
 	actionTimeout             = 5 * time.Second
@@ -39,12 +46,14 @@ const (
 )
 
 type instance struct {
-	mu       sync.RWMutex
-	snap     domain.Snapshot
-	cancel   context.CancelFunc
-	client   *samp.Client
-	position [3]float32
-	playerID int
+	mu        sync.RWMutex
+	snap      domain.Snapshot
+	published domain.Snapshot
+	cancel    context.CancelFunc
+	client    *samp.Client
+	position  [3]float32
+	playerID  int
+	dirty     chan struct{}
 }
 type subscriber struct {
 	state chan domain.Event
@@ -57,6 +66,7 @@ type Manager struct {
 	subscribers map[*subscriber]struct{}
 	msgID       atomic.Int64
 	logDir      string
+	syncEpoch   string
 }
 
 type Option func(*Manager)
@@ -66,7 +76,7 @@ func WithLogDir(path string) Option {
 }
 
 func New(st *store.Store, options ...Option) *Manager {
-	m := &Manager{instances: map[string]*instance{}, store: st, subscribers: map[*subscriber]struct{}{}}
+	m := &Manager{instances: map[string]*instance{}, store: st, subscribers: map[*subscriber]struct{}{}, syncEpoch: uuid.NewString()}
 	for _, option := range options {
 		option(m)
 	}
@@ -75,12 +85,16 @@ func New(st *store.Store, options ...Option) *Manager {
 		if len(m.instances) >= domain.MaxInstances {
 			break
 		}
-		i := newInstance(s)
+		i := newInstance(s, m.syncEpoch)
 		for _, command := range data.Commands {
 			if command.ServerID == s.ID && len(i.snap.Commands) < domain.MaxCommandsPerInstance {
 				i.snap.Commands = append(i.snap.Commands, command)
 			}
 		}
+		// Commands are loaded before any client can observe an update. Keep the
+		// publication baseline aligned with the fully hydrated snapshot so the
+		// first runtime update only reports fields that actually changed.
+		i.published = cloneSnapshot(i.snap)
 		m.instances[s.ID] = i
 	}
 	return m
@@ -160,9 +174,8 @@ func (m *Manager) AddCommand(id string, command domain.QuickCommand) (domain.Qui
 		return domain.QuickCommand{}, err
 	}
 	i.snap.Commands = append(i.snap.Commands, command)
-	snapshot := cloneSnapshot(i.snap)
 	i.mu.Unlock()
-	m.emit(domain.Event{Type: domain.EventInstanceUpdated, InstanceID: id, Data: snapshot})
+	m.publish(id, i)
 	return command, nil
 }
 func (m *Manager) DeleteCommand(id, commandID string) error {
@@ -200,8 +213,9 @@ func (m *Manager) DeleteCommand(id, commandID string) error {
 	m.publish(id, i)
 	return nil
 }
-func newInstance(s domain.Server) *instance {
-	return &instance{snap: domain.Snapshot{Server: s, Connection: domain.Connection{Status: domain.StatusDisconnected}, Chat: []domain.ChatMessage{}, Players: []domain.Player{}, NearbyPlayers: []domain.Player{}, Vehicles: []domain.Vehicle{}, Objects: []domain.Object{}, TextDraws: []domain.TextDraw{}, Dialogs: []domain.Dialog{}, Commands: []domain.QuickCommand{}, VehicleState: domain.VehicleState{VehicleID: domain.InvalidVehicleID}}, playerID: domain.InvalidPlayerID}
+func newInstance(s domain.Server, syncEpoch string) *instance {
+	snapshot := domain.Snapshot{Revision: 1, SyncEpoch: syncEpoch, Server: s, Connection: domain.Connection{Status: domain.StatusDisconnected}, Chat: []domain.ChatMessage{}, Players: []domain.Player{}, NearbyPlayers: []domain.Player{}, Vehicles: []domain.Vehicle{}, Objects: []domain.Object{}, TextDraws: []domain.TextDraw{}, Dialogs: []domain.Dialog{}, Commands: []domain.QuickCommand{}, VehicleState: domain.VehicleState{VehicleID: domain.InvalidVehicleID}}
+	return &instance{snap: snapshot, published: cloneSnapshot(snapshot), playerID: domain.InvalidPlayerID, dirty: make(chan struct{}, 1)}
 }
 func (m *Manager) List() []domain.Snapshot {
 	m.mu.RLock()
@@ -239,7 +253,7 @@ func (m *Manager) Create(s domain.Server) (domain.Snapshot, error) {
 	if s.Encoding == "" {
 		s.Encoding = domain.EncodingUTF8
 	}
-	i := newInstance(s)
+	i := newInstance(s, m.syncEpoch)
 	if err := m.store.Update(func(d *store.Data) error { d.Servers = append(d.Servers, s); return nil }); err != nil {
 		m.mu.Unlock()
 		return domain.Snapshot{}, err
@@ -334,6 +348,7 @@ func (m *Manager) Connect(id string) error {
 	i.mu.Unlock()
 	m.publish(id, i)
 	go m.connect(ctx, id, i, s)
+	go m.publishWorker(ctx, id, i)
 	return nil
 }
 func (m *Manager) connect(ctx context.Context, id string, i *instance, s domain.Server) {
@@ -489,10 +504,14 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 			i.snap.Players = sortPlayers(i.snap.Players, i.playerID)
 			i.snap.NearbyPlayers = upsertPlayer(i.snap.NearbyPlayers, player)
 			sortNearby(i)
+			publishSnapshot = false
+			markDirty(i)
 		case samp.EventPosition:
 			i.position = event.Data.([3]float32)
 			i.snap.VehicleState = domain.VehicleState{VehicleID: domain.InvalidVehicleID}
 			recalculateNearby(i)
+			publishSnapshot = false
+			markDirty(i)
 		case samp.EventVehicleState:
 			v := event.Data.(samp.VehicleStateEvent)
 			vehicleID := domain.InvalidVehicleID
@@ -525,6 +544,8 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 			i.snap.Players = upsertPlayer(i.snap.Players, player)
 			i.snap.Players = sortPlayers(i.snap.Players, i.playerID)
 			recalculateNearby(i)
+			publishSnapshot = false
+			markDirty(i)
 		case samp.EventVehicleSync:
 			v := event.Data.(samp.VehicleEvent)
 			vehicle := findVehicle(i.snap.Vehicles, int(v.ID))
@@ -533,6 +554,8 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 			vehicle.Occupied = true
 			i.snap.Vehicles = upsertVehicle(i.snap.Vehicles, vehicle)
 			sortNearby(i)
+			publishSnapshot = false
+			markDirty(i)
 		case samp.EventDisconnected:
 			i.client = nil
 			if ctx.Err() == nil {
@@ -967,7 +990,78 @@ func (m *Manager) find(id string) (*instance, bool) {
 	return i, ok
 }
 func (m *Manager) publish(id string, i *instance) {
-	m.emit(domain.Event{Type: domain.EventInstanceUpdated, InstanceID: id, Data: i.snapshot()})
+	i.mu.Lock()
+	previous := i.published
+	current := cloneSnapshot(i.snap)
+	operations := snapshotPatch(previous, current)
+	if len(operations) == 0 {
+		i.mu.Unlock()
+		return
+	}
+	i.snap.Revision++
+	current.Revision = i.snap.Revision
+	i.published = cloneSnapshot(current)
+	i.mu.Unlock()
+	m.emit(domain.Event{Type: domain.EventInstanceUpdated, InstanceID: id, Data: domain.InstancePatch{Revision: current.Revision, SyncEpoch: current.SyncEpoch, Operations: operations}})
+}
+
+// markDirty notifies the instance's publishWorker that movement-heavy state
+// changed. It never blocks; the channel only needs to remember that a flush
+// is pending. A nil channel (test-constructed instances) is simply ignored.
+func markDirty(i *instance) {
+	select {
+	case i.dirty <- struct{}{}:
+	default:
+	}
+}
+
+// publishWorker coalesces movement sync updates into at most one state patch
+// per statePublishInterval. Chat and low-frequency state keep publishing
+// immediately through publish; only the hot paths (player/vehicle sync, local
+// position, appearance) are routed here to avoid flooding the websocket.
+func (m *Manager) publishWorker(ctx context.Context, id string, i *instance) {
+	ticker := time.NewTicker(statePublishInterval)
+	defer ticker.Stop()
+	dirty := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-i.dirty:
+			dirty = true
+		case <-ticker.C:
+			if dirty {
+				dirty = false
+				m.publish(id, i)
+			}
+		}
+	}
+}
+
+// snapshotPatch compares explicit public fields. This makes the wire contract
+// auditable and prevents future internal Snapshot fields leaking by accident.
+func snapshotPatch(previous, current domain.Snapshot) []domain.PatchOperation {
+	operations := make([]domain.PatchOperation, 0, 14)
+	add := func(path string, before, after any) {
+		if !reflect.DeepEqual(before, after) {
+			operations = append(operations, domain.PatchOperation{Op: "replace", Path: path, Value: after})
+		}
+	}
+	add("/server", previous.Server, current.Server)
+	add("/connection", previous.Connection, current.Connection)
+	add("/players", previous.Players, current.Players)
+	add("/nearbyPlayers", previous.NearbyPlayers, current.NearbyPlayers)
+	add("/vehicles", previous.Vehicles, current.Vehicles)
+	add("/objects", previous.Objects, current.Objects)
+	add("/textDraws", previous.TextDraws, current.TextDraws)
+	add("/dialogs", previous.Dialogs, current.Dialogs)
+	add("/commands", previous.Commands, current.Commands)
+	add("/activeDialog", previous.ActiveDialog, current.ActiveDialog)
+	add("/vehicleState", previous.VehicleState, current.VehicleState)
+	add("/keyMask", previous.KeyMask, current.KeyMask)
+	add("/afk", previous.AFK, current.AFK)
+	add("/spawned", previous.Spawned, current.Spawned)
+	return operations
 }
 func (m *Manager) emit(e domain.Event) {
 	m.mu.RLock()

@@ -76,6 +76,8 @@ export interface QuickCommand {
   command: string
 }
 export interface Snapshot {
+  revision: number
+  syncEpoch: string
   server: Server
   connection: Connection
   chat: { id: number; text: string; color: string; at: string }[]
@@ -92,6 +94,31 @@ export interface Snapshot {
   afk: boolean
   spawned: boolean
 }
+export type SnapshotPath =
+  | '/server'
+  | '/connection'
+  | '/players'
+  | '/nearbyPlayers'
+  | '/vehicles'
+  | '/objects'
+  | '/textDraws'
+  | '/dialogs'
+  | '/commands'
+  | '/activeDialog'
+  | '/vehicleState'
+  | '/keyMask'
+  | '/afk'
+  | '/spawned'
+export interface PatchOperation {
+  op: 'replace'
+  path: SnapshotPath
+  value: unknown
+}
+export interface InstancePatch {
+  revision: number
+  syncEpoch: string
+  operations: PatchOperation[]
+}
 export interface ChatMessage {
   id: number
   text: string
@@ -105,5 +132,5 @@ export interface ChatPage {
 export interface Event {
   type: string
   instanceId: string
-  data?: Snapshot | ChatMessage
+  data?: Snapshot | InstancePatch | ChatMessage
 }

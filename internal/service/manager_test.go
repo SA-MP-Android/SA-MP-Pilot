@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newManager(t *testing.T) *Manager {
@@ -161,6 +163,27 @@ func TestInstanceLifecycle(t *testing.T) {
 	}
 }
 
+func TestSyncEpochChangesWhenManagerRestarts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := New(st)
+	created, err := first.Create(domain.Server{Host: "127.0.0.1", Port: 7777, Nickname: "tester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := New(st)
+	restarted, ok := second.Get(created.Server.ID)
+	if !ok {
+		t.Fatal("persisted instance was not loaded")
+	}
+	if created.SyncEpoch == "" || created.SyncEpoch == restarted.SyncEpoch {
+		t.Fatalf("manager restart did not create a new sync epoch: first=%q second=%q", created.SyncEpoch, restarted.SyncEpoch)
+	}
+}
+
 func TestQuickCommandsAreIsolatedByInstance(t *testing.T) {
 	m := newManager(t)
 	first, err := m.Create(domain.Server{Host: "127.0.0.1", Port: 7777, Nickname: "first"})
@@ -207,6 +230,102 @@ func TestSnapshotDoesNotShareMutableState(t *testing.T) {
 	snapshot.ActiveDialog.RawMessage[0] = 'X'
 	if i.snap.Chat[0].Text != "original" || i.snap.Commands[0].Label != "original" || i.snap.ActiveDialog.Title != "original" || string(i.snap.ActiveDialog.RawMessage) != "original" {
 		t.Fatal("snapshot shares mutable state with the live instance")
+	}
+}
+
+func TestPublishWorkerCoalescesMovementUpdates(t *testing.T) {
+	old := statePublishInterval
+	statePublishInterval = 10 * time.Millisecond
+	defer func() { statePublishInterval = old }()
+
+	m := newManager(t)
+	snapshot, err := m.Create(domain.Server{Host: "127.0.0.1", Port: 7777, Nickname: "tester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateEvents, _, cleanup, err := m.Subscribe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	i, ok := m.find(snapshot.Server.ID)
+	if !ok {
+		t.Fatal("instance not found")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.publishWorker(ctx, snapshot.Server.ID, i)
+
+	for range 100 {
+		markDirty(i)
+	}
+	i.mu.Lock()
+	i.snap.AFK = true
+	i.mu.Unlock()
+
+	received := 0
+	afkSeen := false
+	window := time.After(300 * time.Millisecond)
+	for {
+		select {
+		case event := <-stateEvents:
+			received++
+			patch, ok := event.Data.(domain.InstancePatch)
+			if !ok {
+				t.Fatalf("event data type = %T, want InstancePatch", event.Data)
+			}
+			for _, operation := range patch.Operations {
+				if operation.Path == "/afk" {
+					afkSeen = true
+				}
+			}
+			if received > 20 {
+				t.Fatalf("burst produced %d patches, want only a few coalesced ones", received)
+			}
+		case <-window:
+			if !afkSeen {
+				t.Fatal("coalesced patch did not include the movement update")
+			}
+			return
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for coalesced publish")
+		}
+	}
+}
+
+func TestPublishEmitsOnlyChangedSnapshotFieldsWithSequentialRevision(t *testing.T) {
+	m := newManager(t)
+	snapshot, err := m.Create(domain.Server{Host: "127.0.0.1", Port: 7777, Nickname: "tester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateEvents, _, cleanup, err := m.Subscribe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	i, ok := m.find(snapshot.Server.ID)
+	if !ok {
+		t.Fatal("instance not found")
+	}
+	i.mu.Lock()
+	i.snap.AFK = true
+	i.mu.Unlock()
+	m.publish(snapshot.Server.ID, i)
+	event := <-stateEvents
+	patch, ok := event.Data.(domain.InstancePatch)
+	if !ok {
+		t.Fatalf("event data type = %T, want InstancePatch", event.Data)
+	}
+	if patch.Revision != snapshot.Revision+1 || len(patch.Operations) != 1 || patch.Operations[0].Path != "/afk" || patch.Operations[0].Value != true {
+		t.Fatalf("unexpected patch: %+v", patch)
+	}
+	if patch.SyncEpoch == "" || patch.SyncEpoch != snapshot.SyncEpoch {
+		t.Fatalf("patch sync epoch = %q, want %q", patch.SyncEpoch, snapshot.SyncEpoch)
+	}
+	got, _ := m.Get(snapshot.Server.ID)
+	if got.Revision != patch.Revision {
+		t.Fatalf("snapshot revision = %d, want %d", got.Revision, patch.Revision)
 	}
 }
 

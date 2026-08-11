@@ -8,11 +8,16 @@ export const DEFAULT_HOST = '127.0.0.1'
 export const DEFAULT_NICKNAME = 'SA-MP-Pilot'
 export const INVALID_PLAYER_PING = 65_535
 export const INVALID_PLAYER_PING_SIGNED = -1
+export const EVENT_INSTANCE_CREATED = 'instance.created'
+export const EVENT_INSTANCE_UPDATED = 'instance.updated'
 export const EVENT_INSTANCE_DELETED = 'instance.deleted'
 export const EVENT_CHAT_MESSAGE = 'chat.message'
 export const EVENT_CHAT_RESET = 'chat.reset'
 export const CHAT_PAGE_SIZE = 50
 export const MAX_CHAT_MESSAGES = 500
+// Minimum interval between nearby tab refreshes; matches the backend publish
+// coalescing interval so the tab never re-renders faster than patches arrive.
+export const NEARBY_REFRESH_MS = 500
 export const TAB_CHAT = 'chat'
 export const STATUS_CONNECTED = 'connected'
 export const STATUS_CONNECTING = 'connecting'

@@ -10,6 +10,8 @@ import type { Snapshot } from './types'
 afterEach(cleanup)
 
 const snapshot: Snapshot = {
+  revision: 1,
+  syncEpoch: 'test-epoch',
   server: {
     id: 'test-instance',
     host: '127.0.0.1',
