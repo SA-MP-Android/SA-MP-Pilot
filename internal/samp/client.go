@@ -12,58 +12,62 @@ import (
 )
 
 const (
-	netGameVersion           uint32 = 4057
-	clientMod                uint8  = 1
-	clientAuth                      = "15121F6F18550C00AC4B4F8A167D0379BB0ACA99043"
-	clientVersion                   = "0.3.7-R4"
-	maxNicknameBytes                = 24
-	maxChatBytes                    = 255
-	maxCommandBytes                 = 1024
-	maxDialogInputBytes             = 255
-	maxDialogMessageBytes           = 4096
-	packetAuthKey            uint8  = 12
-	RPCClientJoin            uint8  = 25
-	RPCRequestClass          uint8  = 128
-	RPCRequestSpawn          uint8  = 129
-	RPCSpawn                 uint8  = 52
-	RPCWorldPlayerAdd        uint8  = 32
-	RPCSetSpawnInfo          uint8  = 68
-	RPCSetPlayerPos          uint8  = 12
-	RPCSetPlayerPosFindZ     uint8  = 13
-	RPCSetPlayerSkin         uint8  = 153
-	RPCSetPlayerTeam         uint8  = 69
-	RPCSetFacingAngle        uint8  = 19
-	RPCPutPlayerInVehicle    uint8  = 70
-	RPCRemoveFromVehicle     uint8  = 71
-	RPCSetPlayerColor        uint8  = 72
-	RPCSetPlayerDrunkLevel   uint8  = 35
-	RPCClickPlayer           uint8  = 23
-	RPCEnterVehicle          uint8  = 26
-	RPCDialogResponse        uint8  = 62
-	RPCClickTextDraw         uint8  = 83
-	RPCChat                  uint8  = 101
-	RPCServerCommand         uint8  = 50
-	RPCExitVehicle           uint8  = 154
-	RPCUpdateScores          uint8  = 155
-	RPCServerJoin            uint8  = 137
-	RPCServerQuit            uint8  = 138
-	RPCInitGame              uint8  = 139
-	RPCClientMessage         uint8  = 93
-	RPCClientCheck           uint8  = 103
-	RPCDialogBox             uint8  = 61
-	RPCShowTextDraw          uint8  = 134
-	RPCHideTextDraw          uint8  = 135
-	RPCSetTextDrawString     uint8  = 105
-	RPCCreateObject          uint8  = 44
-	RPCDestroyObject         uint8  = 47
-	RPCWorldVehicleAdd       uint8  = 164
-	RPCWorldVehicleRemove    uint8  = 165
-	packetPlayerSync         uint8  = 207
-	packetVehicleSync        uint8  = 200
-	packetPassengerSync      uint8  = 211
-	packetStatsUpdate        uint8  = 205
-	playerSyncChannel        uint8  = 1
-	playerSyncInterval              = 100 * time.Millisecond
+	netGameVersion         uint32 = 4057
+	clientMod              uint8  = 1
+	clientAuth                    = "15121F6F18550C00AC4B4F8A167D0379BB0ACA99043"
+	clientVersion                 = "0.3.7-R4"
+	maxNicknameBytes              = 24
+	maxChatBytes                  = 255
+	maxCommandBytes               = 1024
+	maxDialogInputBytes           = 255
+	maxDialogMessageBytes         = 4096
+	packetAuthKey          uint8  = 12
+	RPCClientJoin          uint8  = 25
+	RPCRequestClass        uint8  = 128
+	RPCRequestSpawn        uint8  = 129
+	RPCSpawn               uint8  = 52
+	RPCWorldPlayerAdd      uint8  = 32
+	RPCSetSpawnInfo        uint8  = 68
+	RPCSetPlayerPos        uint8  = 12
+	RPCSetPlayerPosFindZ   uint8  = 13
+	RPCSetPlayerSkin       uint8  = 153
+	RPCSetPlayerTeam       uint8  = 69
+	RPCSetFacingAngle      uint8  = 19
+	RPCPutPlayerInVehicle  uint8  = 70
+	RPCRemoveFromVehicle   uint8  = 71
+	RPCSetPlayerColor      uint8  = 72
+	RPCSetPlayerDrunkLevel uint8  = 35
+	RPCClickPlayer         uint8  = 23
+	RPCEnterVehicle        uint8  = 26
+	RPCDialogResponse      uint8  = 62
+	RPCClickTextDraw       uint8  = 83
+	RPCChat                uint8  = 101
+	RPCServerCommand       uint8  = 50
+	RPCExitVehicle         uint8  = 154
+	RPCUpdateScores        uint8  = 155
+	RPCServerJoin          uint8  = 137
+	RPCServerQuit          uint8  = 138
+	RPCInitGame            uint8  = 139
+	RPCClientMessage       uint8  = 93
+	RPCClientCheck         uint8  = 103
+	RPCDialogBox           uint8  = 61
+	RPCShowTextDraw        uint8  = 134
+	RPCHideTextDraw        uint8  = 135
+	RPCSetTextDrawString   uint8  = 105
+	RPCCreateObject        uint8  = 44
+	RPCDestroyObject       uint8  = 47
+	RPCWorldVehicleAdd     uint8  = 164
+	RPCWorldVehicleRemove  uint8  = 165
+	packetPlayerSync       uint8  = 207
+	packetVehicleSync      uint8  = 200
+	packetPassengerSync    uint8  = 211
+	packetStatsUpdate      uint8  = 205
+	playerSyncChannel      uint8  = 1
+	// Android's raksamp network loop runs at roughly 30 FPS and the default
+	// SA-MP on-foot send rate is 30 ms. Keep the Go sync cadence close to that
+	// loop so the first sync is emitted by the next tick after RPC_Spawn,
+	// instead of being written from inside the spawn RPC handler.
+	playerSyncInterval              = 33 * time.Millisecond
 	scoreRefreshInterval            = 3 * time.Second
 	statsUpdateInterval             = time.Second
 	targetFramesPerSecond    uint32 = 60
@@ -73,15 +77,25 @@ const (
 	clientCheckMemoryType    uint8  = 0x48
 	serverForcedSpawnOutcome uint8  = 2
 	initialClassIndex        uint32 = 0
-	serverInitGracePeriod           = 500 * time.Millisecond
-	spawnRequestDelay               = 150 * time.Millisecond
-	onFootPayloadBytes              = 69
+	// CLocalPlayer::ProcessClassSelection in Android raksamp runs on the
+	// roughly 30 FPS network loop, so its first RequestClass is sent on the
+	// next tick after InitGame rather than after a half-second fallback wait.
+	serverInitGracePeriod = playerSyncInterval
+	onFootPayloadBytes    = 69
 )
+
+// ClientOptions controls compatibility behavior that is optional in the
+// Android raksamp client. In particular, PC client-check emulation is off by
+// default there and must not be advertised unless explicitly requested.
+type ClientOptions struct {
+	EmulatePCClientCheck bool
+}
 
 var (
 	ErrNicknameTooLong = errors.New("samp: nickname is too long")
 	ErrMessageTooLong  = errors.New("samp: message is too long")
 	ErrMalformedPacket = errors.New("samp: malformed packet")
+	ErrSpawnNotReady   = errors.New("samp: spawn information is not ready")
 )
 
 type EventType string
@@ -166,31 +180,42 @@ type VehicleStateEvent struct {
 	VehicleID uint16
 }
 type Client struct {
-	conn           *raknet.Conn
-	codec          encoding.Encoding
-	events         chan Event
-	ctx            context.Context
-	cancel         context.CancelFunc
-	closeOnce      sync.Once
-	stateMu        sync.RWMutex
-	position       [3]float32
-	keyMask        uint32
-	afk            bool
-	vehicleID      uint16
-	inVehicle      bool
-	passenger      bool
-	spawned        bool
-	localID        uint16
-	skin           int32
-	team           uint8
-	rotation       float32
-	drunkLevel     uint32
-	drunkLevelSet  bool
-	initObserved   bool
-	spawnRequested bool
+	conn                 *raknet.Conn
+	codec                encoding.Encoding
+	events               chan Event
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	closeOnce            sync.Once
+	stateMu              sync.RWMutex
+	position             [3]float32
+	keyMask              uint32
+	afk                  bool
+	vehicleID            uint16
+	inVehicle            bool
+	passenger            bool
+	spawned              bool
+	localID              uint16
+	skin                 int32
+	team                 uint8
+	rotation             float32
+	drunkLevel           uint32
+	drunkLevelSet        bool
+	initObserved         bool
+	spawnRequested       bool
+	spawnInfoReady       bool
+	emulatePCClientCheck bool
+	clientCheckStart     time.Time
 }
 
 func DialClient(ctx context.Context, address, nickname, password, charset string) (*Client, error) {
+	return DialClientWithOptions(ctx, address, nickname, password, charset, ClientOptions{})
+}
+
+func DialClientWithOptions(ctx context.Context, address, nickname, password, charset string, options ClientOptions) (*Client, error) {
+	// raksamp's GetTickCount() is backed by a function-local clock that starts
+	// with the native client instance. Keep the emulated ClientCheck value
+	// scoped to this connection instead of the Go process/package lifetime.
+	clientCheckStart := time.Now()
 	codec := codecFor(charset)
 	encoded, e := encodeText(codec, nickname)
 	if e != nil {
@@ -204,7 +229,15 @@ func DialClient(ctx context.Context, address, nickname, password, charset string
 		return nil, e
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
-	c := &Client{conn: conn, codec: codec, events: make(chan Event, 256), ctx: runCtx, cancel: cancel}
+	c := &Client{
+		conn:                 conn,
+		codec:                codec,
+		events:               make(chan Event, 256),
+		ctx:                  runCtx,
+		cancel:               cancel,
+		emulatePCClientCheck: options.EmulatePCClientCheck,
+		clientCheckStart:     clientCheckStart,
+	}
 	handshakeCtx, handshakeCancel := context.WithTimeout(ctx, gameHandshakeTimeout)
 	defer handshakeCancel()
 	var accepted []byte
@@ -303,6 +336,31 @@ func (c *Client) RespondDialogBytes(ctx context.Context, id int16, button uint8,
 func (c *Client) RefreshScores(ctx context.Context) error {
 	w := raknet.Writer{}
 	return c.sendRPC(ctx, RPCUpdateScores, &w, raknet.Reliable)
+}
+
+// RequestSpawn mirrors the Android raksamp spawn button. A class response
+// only supplies spawn information; the client must explicitly request spawn
+// unless the server sends a forced-spawn outcome.
+func (c *Client) RequestSpawn(ctx context.Context) error {
+	c.stateMu.Lock()
+	if !c.spawnInfoReady {
+		c.stateMu.Unlock()
+		return ErrSpawnNotReady
+	}
+	if c.spawned || c.spawnRequested {
+		c.stateMu.Unlock()
+		return nil
+	}
+	c.spawnRequested = true
+	c.stateMu.Unlock()
+	request := raknet.Writer{}
+	if err := c.sendRPC(ctx, RPCRequestSpawn, &request, raknet.Reliable); err != nil {
+		c.stateMu.Lock()
+		c.spawnRequested = false
+		c.stateMu.Unlock()
+		return err
+	}
+	return nil
 }
 func (c *Client) ClickPlayer(ctx context.Context, playerID uint16) error {
 	w := raknet.Writer{}
@@ -462,8 +520,9 @@ func (c *Client) sendVehicle(ctx context.Context, passenger bool) error {
 	w.Uint16(0)
 	w.Uint16(0)
 	w.Uint16(protocolVehicleKeys(mask))
-	w.Float32(1)
-	for range 3 {
+	// Keep the vehicle quaternion identical to Android raksamp's stubbed
+	// SetFromMatrix path, which leaves the zero-initialized value unchanged.
+	for range 4 {
 		w.Float32(0)
 	}
 	for _, value := range position {
@@ -491,8 +550,9 @@ func encodeOnFoot(position [3]float32, mask uint32) []byte {
 	for _, value := range position {
 		w.Float32(value)
 	}
-	w.Float32(1)
-	for range 3 {
+	// Android raksamp currently has a stubbed SetFromMatrix(), so its
+	// zero-initialized on-foot quaternion remains four zero floats.
+	for range 4 {
 		w.Float32(0)
 	}
 	w.Uint8(defaultPlayerHealth)
@@ -744,6 +804,7 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 		c.localID = localPlayerID
 		c.initObserved = false
 		c.spawnRequested = false
+		c.spawnInfoReady = false
 		c.stateMu.Unlock()
 		go c.requestInitialClassFallback()
 		return &Event{Type: EventJoined, Data: PlayerEvent{ID: localPlayerID}}, nil
@@ -760,7 +821,6 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 			return nil, e
 		}
 		c.setSpawnInfo(spawnInfo)
-		go c.requestSpawnAfterClass()
 		appearance := spawnInfo.PlayerEvent()
 		c.stateMu.RLock()
 		appearance.ID = c.localID
@@ -782,9 +842,6 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 				return nil, e
 			}
 			c.setSpawned(true)
-			if e = c.sendSync(c.ctx); e != nil {
-				return nil, e
-			}
 		} else if outcome == 0 {
 			c.stateMu.Lock()
 			c.spawnRequested = false
@@ -952,6 +1009,9 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 		}
 		return &Event{Type: EventScores, Data: players}, nil
 	case RPCClientCheck:
+		if !c.emulatePCClientCheck {
+			return nil, nil
+		}
 		checkType, e := r.Uint8()
 		if e != nil {
 			return nil, e
@@ -966,7 +1026,7 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 		response := raknet.Writer{}
 		response.Uint8(checkType)
 		response.Uint32(address)
-		response.Uint8(uint8(time.Now().UnixMilli()))
+		response.Uint8(c.clientCheckMillisecondsLowByte())
 		if e = c.sendRPC(c.ctx, RPCClientCheck, &response, raknet.Reliable); e != nil {
 			return nil, e
 		}
@@ -1030,6 +1090,16 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 		return &Event{Type: EventVehicleRemove, Data: VehicleEvent{ID: id}}, nil
 	}
 	return nil, nil
+}
+
+func (c *Client) clientCheckMillisecondsLowByte() uint8 {
+	start := c.clientCheckStart
+	if start.IsZero() {
+		// Keep zero-value Clients useful for protocol decoding tests and for
+		// callers that construct a Client internally.
+		start = time.Now()
+	}
+	return uint8(time.Since(start).Milliseconds())
 }
 
 func decodeInitGameLocalPlayerID(r *raknet.Reader) (uint16, error) {
@@ -1150,6 +1220,7 @@ func (c *Client) clearVehicleState() {
 func (c *Client) setSpawnInfo(info SpawnInfo) {
 	c.stateMu.Lock()
 	c.position, c.skin, c.team, c.rotation = info.Position, info.Skin, info.Team, info.Rotation
+	c.spawnInfoReady = true
 	c.stateMu.Unlock()
 }
 
@@ -1187,24 +1258,6 @@ func (c *Client) requestInitialClassFallback() {
 	_ = c.sendRPC(c.ctx, RPCRequestClass, &request, raknet.Reliable)
 }
 
-func (c *Client) requestSpawnAfterClass() {
-	timer := time.NewTimer(spawnRequestDelay)
-	defer timer.Stop()
-	select {
-	case <-c.ctx.Done():
-		return
-	case <-timer.C:
-	}
-	c.stateMu.Lock()
-	if c.spawned || c.spawnRequested {
-		c.stateMu.Unlock()
-		return
-	}
-	c.spawnRequested = true
-	c.stateMu.Unlock()
-	request := raknet.Writer{}
-	_ = c.sendRPC(c.ctx, RPCRequestSpawn, &request, raknet.Reliable)
-}
 func decodeTextDraw(r *raknet.Reader, codec encoding.Encoding) (TextDrawEvent, error) {
 	var v TextDrawEvent
 	var e error

@@ -11,6 +11,7 @@ import {
   ACTION_EXIT_VEHICLE,
   ACTION_KEYS,
   ACTION_SHOW_DIALOG,
+  ACTION_SPAWN,
   ACTION_TEXT_DRAW,
   CHAT_BOTTOM_TOLERANCE_PX,
   INVALID_PLAYER_PING,
@@ -184,6 +185,11 @@ export function Workspace({
         )}
         {connection.status === STATUS_CONNECTED && <Badge variant="secondary">{stateLabel}</Badge>}
         <div className="flex w-full flex-wrap gap-2 sm:ml-auto sm:w-auto sm:flex-nowrap">
+          {connection.status === STATUS_CONNECTED && value.spawnReady && !value.spawned && (
+            <Button variant="secondary" onClick={() => act(ACTION_SPAWN)}>
+              {t('common.spawn')}
+            </Button>
+          )}
           <Button variant="outline" onClick={() => setEditing(true)}>
             <Settings size={15} />
             {t('common.settings')}

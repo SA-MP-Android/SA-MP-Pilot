@@ -19,6 +19,13 @@ const instancePath = (id: string) => `/instances/${id}`
 export function normalizeSnapshot(value: Snapshot): Snapshot {
   return {
     ...value,
+    server: value.server
+      ? {
+          ...value.server,
+          // Older persisted servers do not have this optional compatibility flag.
+          emulatePcClientCheck: value.server.emulatePcClientCheck ?? false,
+        }
+      : value.server,
     revision: value.revision ?? 0,
     syncEpoch: value.syncEpoch ?? '',
     chat: value.chat ?? [],
@@ -29,6 +36,7 @@ export function normalizeSnapshot(value: Snapshot): Snapshot {
     textDraws: value.textDraws ?? [],
     dialogs: value.dialogs ?? [],
     commands: value.commands ?? [],
+    spawnReady: value.spawnReady ?? false,
   }
 }
 export function upsertSnapshot(items: Snapshot[], snapshot: Snapshot): Snapshot[] {
@@ -97,6 +105,9 @@ export function applyInstancePatch(snapshot: Snapshot, patch: InstancePatch): Sn
         break
       case '/spawned':
         next.spawned = operation.value as boolean
+        break
+      case '/spawnReady':
+        next.spawnReady = operation.value as boolean
         break
       default:
         return null

@@ -78,6 +78,18 @@ export function ServerForm({
           </SelectContent>
         </Select>
       </Label>
+      <Label className="flex items-start gap-2 text-sm">
+        <Checkbox
+          checked={value.emulatePcClientCheck}
+          onCheckedChange={(checked) => onChange({ ...value, emulatePcClientCheck: checked === true })}
+        />
+        <span>
+          <span className="block">{t('server.emulatePcClientCheck')}</span>
+          <span className="text-muted-foreground block text-xs">
+            {t('server.emulatePcClientCheckDescription')}
+          </span>
+        </span>
+      </Label>
       {showAutoConnect && (
         <Label className="flex items-center gap-2 text-sm">
           <Checkbox

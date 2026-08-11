@@ -20,6 +20,7 @@ const snapshot: Snapshot = {
     password: '',
     encoding: 'utf-8',
     autoConnect: false,
+    emulatePcClientCheck: false,
   },
   connection: {
     status: 'connected',
@@ -49,6 +50,7 @@ const snapshot: Snapshot = {
   keyMask: 0,
   afk: false,
   spawned: true,
+  spawnReady: false,
 }
 
 describe('ServerDialog', () => {
@@ -91,6 +93,23 @@ describe('ServerDialog', () => {
 })
 
 describe('Workspace quick commands', () => {
+  it('shows the spawn action only after spawn information is ready', () => {
+    const { rerender } = render(
+      <Workspace
+        value={{ ...snapshot, activeDialog: null, spawned: false, spawnReady: false }}
+        onDelete={vi.fn()}
+      />,
+    )
+    expect(screen.queryByRole('button', { name: 'Spawn' })).toBeNull()
+    rerender(
+      <Workspace
+        value={{ ...snapshot, activeDialog: null, spawned: false, spawnReady: true }}
+        onDelete={vi.fn()}
+      />,
+    )
+    expect(screen.getByRole('button', { name: 'Spawn' })).toBeTruthy()
+  })
+
   it('requires confirmation before deleting an instance command', async () => {
     const removeCommand = vi.spyOn(api, 'removeCommand').mockResolvedValue(undefined)
     render(

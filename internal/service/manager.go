@@ -380,7 +380,14 @@ func (m *Manager) connect(ctx context.Context, id string, i *instance, s domain.
 
 func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s domain.Server) error {
 	address := net.JoinHostPort(s.Host, strconv.Itoa(s.Port))
-	client, err := samp.DialClient(ctx, address, s.Nickname, s.Password, string(s.Encoding))
+	client, err := samp.DialClientWithOptions(
+		ctx,
+		address,
+		s.Nickname,
+		s.Password,
+		string(s.Encoding),
+		samp.ClientOptions{EmulatePCClientCheck: s.EmulatePCClientCheck},
+	)
 	if err != nil {
 		return err
 	}
@@ -401,6 +408,7 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 		case samp.EventJoined:
 			localPlayer := event.Data.(samp.PlayerEvent)
 			i.playerID = int(localPlayer.ID)
+			i.snap.SpawnReady = false
 			i.snap.Players = upsertPlayer(i.snap.Players, domain.Player{ID: int(localPlayer.ID), Name: s.Nickname})
 			i.snap.Players = sortPlayers(i.snap.Players, i.playerID)
 			now := time.Now()
@@ -521,8 +529,12 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 			i.snap.VehicleState = domain.VehicleState{InVehicle: v.InVehicle, Passenger: v.Passenger, VehicleID: vehicleID}
 		case samp.EventSpawned:
 			i.snap.Spawned = true
+			i.snap.SpawnReady = false
 		case samp.EventAppearance:
 			v := event.Data.(samp.PlayerEvent)
+			if int(v.ID) == i.playerID && v.HasPosition && v.HasSkin && v.HasTeam && v.HasRotation {
+				i.snap.SpawnReady = true
+			}
 			player := findPlayer(i.snap.Players, int(v.ID))
 			player.ID = int(v.ID)
 			if v.HasSkin {
@@ -666,6 +678,7 @@ func resetConnectionState(i *instance) {
 	i.snap.KeyMask = 0
 	i.snap.AFK = false
 	i.snap.Spawned = false
+	i.snap.SpawnReady = false
 	i.position = [3]float32{}
 	i.playerID = domain.InvalidPlayerID
 }
@@ -852,6 +865,12 @@ func (m *Manager) Action(id, action string, p map[string]any) error {
 			return err
 		}
 		return nil
+	case domain.ActionSpawn:
+		i.mu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
+		err := client.RequestSpawn(ctx)
+		cancel()
+		return err
 	case domain.ActionKeys:
 		mask := uint32(number(p["mask"]))
 		i.mu.Unlock()
@@ -1041,7 +1060,7 @@ func (m *Manager) publishWorker(ctx context.Context, id string, i *instance) {
 // snapshotPatch compares explicit public fields. This makes the wire contract
 // auditable and prevents future internal Snapshot fields leaking by accident.
 func snapshotPatch(previous, current domain.Snapshot) []domain.PatchOperation {
-	operations := make([]domain.PatchOperation, 0, 14)
+	operations := make([]domain.PatchOperation, 0, 15)
 	add := func(path string, before, after any) {
 		if !reflect.DeepEqual(before, after) {
 			operations = append(operations, domain.PatchOperation{Op: "replace", Path: path, Value: after})
@@ -1061,6 +1080,7 @@ func snapshotPatch(previous, current domain.Snapshot) []domain.PatchOperation {
 	add("/keyMask", previous.KeyMask, current.KeyMask)
 	add("/afk", previous.AFK, current.AFK)
 	add("/spawned", previous.Spawned, current.Spawned)
+	add("/spawnReady", previous.SpawnReady, current.SpawnReady)
 	return operations
 }
 func (m *Manager) emit(e domain.Event) {

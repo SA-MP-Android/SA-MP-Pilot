@@ -15,6 +15,7 @@ const (
 	StatusConnected        = "connected"
 	StatusError            = "error"
 	ActionChat             = "chat"
+	ActionSpawn            = "spawn"
 	ActionKeys             = "keys"
 	ActionAFK              = "afk"
 	ActionTeleport         = "teleport"
@@ -44,13 +45,14 @@ const (
 )
 
 type Server struct {
-	ID          string   `json:"id"`
-	Host        string   `json:"host"`
-	Nickname    string   `json:"nickname"`
-	Password    string   `json:"password"`
-	Port        int      `json:"port"`
-	Encoding    Encoding `json:"encoding"`
-	AutoConnect bool     `json:"autoConnect"`
+	ID                   string   `json:"id"`
+	Host                 string   `json:"host"`
+	Nickname             string   `json:"nickname"`
+	Password             string   `json:"password"`
+	Port                 int      `json:"port"`
+	Encoding             Encoding `json:"encoding"`
+	AutoConnect          bool     `json:"autoConnect"`
+	EmulatePCClientCheck bool     `json:"emulatePcClientCheck"`
 }
 type Connection struct {
 	Status      string     `json:"status"`
@@ -158,6 +160,7 @@ type Snapshot struct {
 	KeyMask       int            `json:"keyMask"`
 	AFK           bool           `json:"afk"`
 	Spawned       bool           `json:"spawned"`
+	SpawnReady    bool           `json:"spawnReady"`
 }
 
 // InstancePatch is the incremental form of an instance update. Each operation

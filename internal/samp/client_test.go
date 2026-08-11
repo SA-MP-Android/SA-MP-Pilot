@@ -3,6 +3,7 @@ package samp
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"math"
 	"testing"
 
@@ -10,8 +11,9 @@ import (
 )
 
 const (
-	testPositionOffset = 7
-	testWeaponOffset   = 37
+	testPositionOffset   = 7
+	testQuaternionOffset = testPositionOffset + 12
+	testWeaponOffset     = 37
 )
 
 func TestEncodeOnFootLayout(t *testing.T) {
@@ -33,6 +35,11 @@ func TestEncodeOnFootLayout(t *testing.T) {
 		got := math.Float32frombits(binary.LittleEndian.Uint32(payload[offset : offset+4]))
 		if got != want {
 			t.Fatalf("position[%d] = %v, want %v", index, got, want)
+		}
+	}
+	for index, value := range payload[testQuaternionOffset : testQuaternionOffset+16] {
+		if value != 0 {
+			t.Fatalf("quaternion byte[%d] = %#x, want zero", index, value)
 		}
 	}
 	if got := payload[testWeaponOffset] >> 6; got != 1 {
@@ -135,8 +142,19 @@ func TestDispatchTimestampedDialogRPC(t *testing.T) {
 
 func TestClientCheckRejectsTruncatedPayload(t *testing.T) {
 	rpc := raknet.RPC{ID: RPCClientCheck, Payload: []byte{clientCheckMemoryType}, PayloadBits: 8}
-	if _, err := (&Client{}).decodeRPC(rpc); err == nil {
+	client := &Client{emulatePCClientCheck: true}
+	if _, err := client.decodeRPC(rpc); err == nil {
 		t.Fatal("expected truncated ClientCheck payload to fail")
+	}
+}
+
+func TestClientCheckIsDisabledByDefault(t *testing.T) {
+	w := raknet.Writer{}
+	w.Uint8(clientCheckMemoryType)
+	w.Uint32(0x12345678)
+	client := &Client{}
+	if event, err := client.decodeRPC(raknet.RPC{ID: RPCClientCheck, Payload: w.Bytes(), PayloadBits: w.LenBits()}); err != nil || event != nil {
+		t.Fatalf("disabled ClientCheck = event %v, error %v; want no response", event, err)
 	}
 }
 
@@ -280,6 +298,32 @@ func TestRejectedRequestClassDoesNotRequireSpawnInfo(t *testing.T) {
 	}
 	if event != nil {
 		t.Fatalf("unexpected event: %+v", event)
+	}
+}
+
+func TestRequestClassDoesNotAutomaticallyRequestSpawn(t *testing.T) {
+	w := raknet.Writer{}
+	w.Uint8(1)
+	w.Uint8(1)
+	w.Uint32(7)
+	w.Uint8(0)
+	for range 3 {
+		w.Float32(0)
+	}
+	w.Float32(0)
+	c := &Client{}
+	if _, err := c.decodeRPC(raknet.RPC{ID: RPCRequestClass, Payload: w.Bytes(), PayloadBits: w.LenBits()}); err != nil {
+		t.Fatal(err)
+	}
+	if c.spawnRequested {
+		t.Fatal("class response automatically requested spawn")
+	}
+}
+
+func TestRequestSpawnRequiresSpawnInfo(t *testing.T) {
+	client := &Client{}
+	if err := client.RequestSpawn(context.Background()); !errors.Is(err, ErrSpawnNotReady) {
+		t.Fatalf("RequestSpawn error = %v, want %v", err, ErrSpawnNotReady)
 	}
 }
 

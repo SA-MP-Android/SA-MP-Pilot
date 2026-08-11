@@ -32,6 +32,7 @@ const defaultServer: Omit<Server, 'id'> = {
   password: '',
   encoding: 'utf-8',
   autoConnect: false,
+  emulatePcClientCheck: false,
 }
 
 export { ServerDialog } from '@/features/dialogs/server-dialog'

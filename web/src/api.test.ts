@@ -105,6 +105,7 @@ describe('api', () => {
       keyMask: 0,
       afk: false,
       spawned: false,
+      spawnReady: false,
     } as unknown as Snapshot
     const patch: InstancePatch = {
       revision: 8,
@@ -112,12 +113,14 @@ describe('api', () => {
       operations: [
         { op: 'replace', path: '/connection', value: { status: 'connected' } },
         { op: 'replace', path: '/spawned', value: true },
+        { op: 'replace', path: '/spawnReady', value: true },
       ],
     }
     expect(applyInstancePatch(current, patch)).toMatchObject({
       revision: 8,
       connection: { status: 'connected' },
       spawned: true,
+      spawnReady: true,
       server: { id: 'instance' },
     })
   })

@@ -109,6 +109,7 @@ func TestResetConnectionStateClearsTransientInstanceData(t *testing.T) {
 		KeyMask:       7,
 		AFK:           true,
 		Spawned:       true,
+		SpawnReady:    true,
 	}}
 	i.position = [3]float32{1, 2, 3}
 	i.playerID = 8
@@ -116,7 +117,7 @@ func TestResetConnectionStateClearsTransientInstanceData(t *testing.T) {
 	if len(i.snap.Players) != 0 || len(i.snap.NearbyPlayers) != 0 || len(i.snap.Vehicles) != 0 || len(i.snap.Objects) != 0 || len(i.snap.TextDraws) != 0 || i.snap.ActiveDialog != nil || len(i.snap.Dialogs) != 0 {
 		t.Fatalf("transient collections were not cleared: %+v", i.snap)
 	}
-	if i.snap.VehicleState.VehicleID != domain.InvalidVehicleID || i.snap.KeyMask != 0 || i.snap.AFK || i.snap.Spawned {
+	if i.snap.VehicleState.VehicleID != domain.InvalidVehicleID || i.snap.KeyMask != 0 || i.snap.AFK || i.snap.Spawned || i.snap.SpawnReady {
 		t.Fatalf("transient state was not reset: %+v", i.snap)
 	}
 	if i.position != [3]float32{} || i.playerID != domain.InvalidPlayerID {

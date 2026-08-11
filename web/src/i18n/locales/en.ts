@@ -15,6 +15,7 @@ export default {
     remove: 'Remove',
     select: 'Select',
     send: 'Send',
+    spawn: 'Spawn',
     teleport: 'Teleport',
     settings: 'Settings',
     connect: 'Connect',
@@ -31,6 +32,8 @@ export default {
     password: 'Password',
     encoding: 'Encoding',
     autoConnect: 'Connect on startup',
+    emulatePcClientCheck: 'Emulate PC ClientCheck',
+    emulatePcClientCheckDescription: 'Respond to type 0x48 client checks from compatible servers.',
     saved: 'Settings saved',
     deleteTitle: 'Delete this instance?',
     deleteDescription:

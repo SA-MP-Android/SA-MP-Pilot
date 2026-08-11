@@ -17,6 +17,7 @@ function snapshot(revision: number, syncEpoch = 'epoch', overrides: Partial<Snap
       password: '',
       encoding: 'utf-8',
       autoConnect: false,
+      emulatePcClientCheck: false,
     },
     connection: { status: 'connected', serverName: '', error: '', playerCount: 0, maxPlayers: 0 },
     chat: [],
@@ -32,6 +33,7 @@ function snapshot(revision: number, syncEpoch = 'epoch', overrides: Partial<Snap
     keyMask: 0,
     afk: false,
     spawned: false,
+    spawnReady: false,
     ...overrides,
   }
 }

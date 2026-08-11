@@ -7,6 +7,7 @@ export interface Server {
   password: string
   encoding: 'utf-8' | 'gbk' | 'windows-1251'
   autoConnect: boolean
+  emulatePcClientCheck: boolean
 }
 export interface Connection {
   status: Status
@@ -93,6 +94,7 @@ export interface Snapshot {
   keyMask: number
   afk: boolean
   spawned: boolean
+  spawnReady: boolean
 }
 export type SnapshotPath =
   | '/server'
@@ -109,6 +111,7 @@ export type SnapshotPath =
   | '/keyMask'
   | '/afk'
   | '/spawned'
+  | '/spawnReady'
 export interface PatchOperation {
   op: 'replace'
   path: SnapshotPath
