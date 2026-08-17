@@ -9,6 +9,7 @@ import (
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/domain"
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/raknet"
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/store"
+	"github.com/SA-MP-Android/SA-MP-Pilot/plugin"
 	"os"
 	"path/filepath"
 	"strings"
@@ -161,6 +162,24 @@ func TestInstanceLifecycle(t *testing.T) {
 	}
 	if len(m.List()) != 0 {
 		t.Fatal("instance was not deleted")
+	}
+}
+
+func TestPluginEventsArePublishedToDedicatedSubscribers(t *testing.T) {
+	m := newManager(t)
+	events, cleanup, err := m.SubscribePluginEvents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	m.PublishPluginEvent(plugin.Event{Name: plugin.EventPluginLog, Data: map[string]string{"message": "hello"}})
+	select {
+	case event := <-events:
+		if event.Type != plugin.EventPluginLog {
+			t.Fatalf("event type = %q", event.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("plugin event was not published")
 	}
 }
 

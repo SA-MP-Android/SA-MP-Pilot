@@ -131,3 +131,68 @@
     @apply font-sans;
   }
 }
+
+@layer components {
+  .plugin-code-editor .cm-scroller {
+    scrollbar-color: color-mix(in oklab, var(--muted-foreground) 55%, transparent) transparent;
+    scrollbar-width: thin;
+  }
+
+  .plugin-code-editor .cm-scroller::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .plugin-code-editor .cm-scroller::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .plugin-code-editor .cm-scroller::-webkit-scrollbar-thumb {
+    background: color-mix(in oklab, var(--muted-foreground) 55%, transparent);
+    background-clip: padding-box;
+    border: 2px solid transparent;
+    border-radius: 9999px;
+  }
+
+  .plugin-code-editor .cm-scroller::-webkit-scrollbar-thumb:hover {
+    background: var(--muted-foreground);
+    background-clip: padding-box;
+  }
+
+  .plugin-code-editor .tok-keyword {
+    color: #c678dd;
+  }
+
+  .plugin-code-editor .tok-string,
+  .plugin-code-editor .tok-string2 {
+    color: #98c379;
+  }
+
+  .plugin-code-editor .tok-number,
+  .plugin-code-editor .tok-atom,
+  .plugin-code-editor .tok-bool {
+    color: #d19a66;
+  }
+
+  .plugin-code-editor .tok-comment {
+    color: #7d8799;
+  }
+
+  .plugin-code-editor .tok-propertyName {
+    color: #56b6c2;
+  }
+
+  .plugin-code-editor .tok-variableName,
+  .plugin-code-editor .tok-typeName,
+  .plugin-code-editor .tok-className {
+    color: #61afef;
+  }
+
+  .plugin-code-editor .tok-operator {
+    color: #56b6c2;
+  }
+
+  .plugin-code-editor .tok-punctuation {
+    color: #abb2bf;
+  }
+}

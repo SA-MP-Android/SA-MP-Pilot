@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -18,6 +19,7 @@ import (
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/raknet"
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/samp"
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/store"
+	"github.com/SA-MP-Android/SA-MP-Pilot/plugin"
 	"github.com/google/uuid"
 )
 
@@ -59,14 +61,20 @@ type subscriber struct {
 	state chan domain.Event
 	chat  chan domain.Event
 }
+type pluginSubscriber struct {
+	events chan domain.Event
+}
 type Manager struct {
-	mu          sync.RWMutex
-	instances   map[string]*instance
-	store       *store.Store
-	subscribers map[*subscriber]struct{}
-	msgID       atomic.Int64
-	logDir      string
-	syncEpoch   string
+	mu                sync.RWMutex
+	instances         map[string]*instance
+	store             *store.Store
+	subscribers       map[*subscriber]struct{}
+	pluginSubscribers map[*pluginSubscriber]struct{}
+	msgID             atomic.Int64
+	logDir            string
+	syncEpoch         string
+	pluginMu          sync.RWMutex
+	pluginSink        plugin.EventSink
 }
 
 type Option func(*Manager)
@@ -75,8 +83,16 @@ func WithLogDir(path string) Option {
 	return func(manager *Manager) { manager.logDir = path }
 }
 
+// SetPluginSink attaches the external plugin host. It is separate from New
+// because the host calls back into Manager for API requests.
+func (m *Manager) SetPluginSink(sink plugin.EventSink) {
+	m.pluginMu.Lock()
+	m.pluginSink = sink
+	m.pluginMu.Unlock()
+}
+
 func New(st *store.Store, options ...Option) *Manager {
-	m := &Manager{instances: map[string]*instance{}, store: st, subscribers: map[*subscriber]struct{}{}, syncEpoch: uuid.NewString()}
+	m := &Manager{instances: map[string]*instance{}, store: st, subscribers: map[*subscriber]struct{}{}, pluginSubscribers: map[*pluginSubscriber]struct{}{}, syncEpoch: uuid.NewString()}
 	for _, option := range options {
 		option(m)
 	}
@@ -402,6 +418,7 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 	info, _ := samp.Query(ctx, s.Host, s.Port)
 	var disconnectErr error
 	for event := range client.Events() {
+		m.emitClientPluginEvent(id, event)
 		i.mu.Lock()
 		publishSnapshot := true
 		switch event.Type {
@@ -1001,6 +1018,116 @@ func (m *Manager) Action(id, action string, p map[string]any) error {
 	m.publish(id, i)
 	return nil
 }
+
+func (m *Manager) RefreshScores(ctx context.Context, id string) error {
+	i, ok := m.find(id)
+	if !ok {
+		return errors.New("instance not found")
+	}
+	i.mu.RLock()
+	client := i.client
+	connected := i.snap.Connection.Status == domain.StatusConnected
+	i.mu.RUnlock()
+	if client == nil || !connected {
+		return errors.New("instance is not connected")
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, actionTimeout)
+	defer cancel()
+	return client.RefreshScores(requestCtx)
+}
+
+// InvokePluginAPI is the intentionally broad API boundary exposed to
+// out-of-process plugins. Keep the method names stable and make the generic
+// action endpoint available as an escape hatch for new client capabilities.
+func (m *Manager) InvokePluginAPI(ctx context.Context, instanceID, method string, raw json.RawMessage) (any, error) {
+	params, err := pluginParams(raw)
+	if err != nil {
+		return nil, err
+	}
+	switch method {
+	case plugin.MethodListInstances:
+		return m.List(), nil
+	case plugin.MethodGetInstanceOld, plugin.MethodGetInstance:
+		if instanceID == "" {
+			instanceID, _ = params["instanceId"].(string)
+		}
+		snapshot, ok := m.Get(instanceID)
+		if !ok {
+			return nil, errors.New("instance not found")
+		}
+		return snapshot, nil
+	case plugin.MethodGetChat:
+		before := int64(number(params["before"]))
+		limit := int(number(params["limit"]))
+		return m.Chat(instanceID, before, limit)
+	case plugin.MethodConnect:
+		return nil, m.Connect(instanceID)
+	case plugin.MethodDisconnect:
+		return nil, m.Disconnect(instanceID)
+	case plugin.MethodAction:
+		action, _ := params["action"].(string)
+		actionParams, _ := params["params"].(map[string]any)
+		if action == "" {
+			return nil, errors.New("action is required")
+		}
+		return nil, m.Action(instanceID, action, actionParams)
+	case plugin.MethodSendChat:
+		text, _ := params["text"].(string)
+		return nil, m.Action(instanceID, domain.ActionChat, map[string]any{"text": text})
+	case plugin.MethodSendCommand:
+		command, _ := params["command"].(string)
+		if command != "" && !strings.HasPrefix(command, "/") {
+			command = "/" + command
+		}
+		return nil, m.Action(instanceID, domain.ActionChat, map[string]any{"text": command})
+	case plugin.MethodRequestSpawn:
+		return nil, m.Action(instanceID, domain.ActionSpawn, nil)
+	case plugin.MethodRefreshScores:
+		return nil, m.RefreshScores(ctx, instanceID)
+	case plugin.MethodSetKeys, plugin.MethodSetAFK, plugin.MethodTeleport, plugin.MethodEnterVehicle, plugin.MethodExitVehicle, plugin.MethodRespondDialog, plugin.MethodClickPlayer, plugin.MethodClickTextDraw:
+		return nil, m.Action(instanceID, pluginAction(method), params)
+	default:
+		return nil, fmt.Errorf("unknown plugin API method %q", method)
+	}
+}
+
+func pluginParams(raw json.RawMessage) (map[string]any, error) {
+	if len(raw) == 0 {
+		return map[string]any{}, nil
+	}
+	var params map[string]any
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return nil, fmt.Errorf("invalid plugin parameters: %w", err)
+	}
+	if params == nil {
+		params = map[string]any{}
+	}
+	return params, nil
+}
+
+func pluginAction(method string) string {
+	switch method {
+	case plugin.MethodSetKeys:
+		return domain.ActionKeys
+	case plugin.MethodSetAFK:
+		return domain.ActionAFK
+	case plugin.MethodTeleport:
+		return domain.ActionTeleport
+	case plugin.MethodEnterVehicle:
+		return domain.ActionEnterVehicle
+	case plugin.MethodExitVehicle:
+		return domain.ActionExitVehicle
+	case plugin.MethodRespondDialog:
+		return domain.ActionDialog
+	case plugin.MethodClickPlayer:
+		return domain.ActionClickPlayer
+	case plugin.MethodClickTextDraw:
+		return domain.ActionTextDraw
+	default:
+		return ""
+	}
+}
+
 func number(v any) float64 { n, _ := v.(float64); return n }
 func (m *Manager) find(id string) (*instance, bool) {
 	m.mu.RLock()
@@ -1084,6 +1211,12 @@ func snapshotPatch(previous, current domain.Snapshot) []domain.PatchOperation {
 	return operations
 }
 func (m *Manager) emit(e domain.Event) {
+	m.pluginMu.RLock()
+	sink := m.pluginSink
+	m.pluginMu.RUnlock()
+	if sink != nil {
+		sink.Emit(plugin.Event{Name: e.Type, InstanceID: e.InstanceID, Time: time.Now(), Data: e.Data})
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for subscription := range m.subscribers {
@@ -1097,6 +1230,51 @@ func (m *Manager) emit(e domain.Event) {
 		}
 	}
 }
+
+func (m *Manager) emitClientPluginEvent(instanceID string, event samp.Event) {
+	m.pluginMu.RLock()
+	sink := m.pluginSink
+	m.pluginMu.RUnlock()
+	if sink == nil {
+		return
+	}
+	data := event.Data
+	if err, ok := data.(error); ok {
+		data = map[string]string{"error": err.Error()}
+	}
+	sink.Emit(plugin.Event{Name: plugin.EventClientPrefix + string(event.Type), InstanceID: instanceID, Time: time.Now(), Data: data})
+}
+
+// PublishPluginEvent forwards plugin-host diagnostics and event envelopes to
+// browser subscribers without feeding them back into the plugin host.
+func (m *Manager) PublishPluginEvent(event plugin.Event) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for subscription := range m.pluginSubscribers {
+		select {
+		case subscription.events <- domain.Event{Type: event.Name, InstanceID: event.InstanceID, Data: event.Data}:
+		default:
+		}
+	}
+}
+
+func (m *Manager) SubscribePluginEvents() (<-chan domain.Event, func(), error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.pluginSubscribers) >= maxSubscribers {
+		return nil, nil, errors.New("plugin subscriber limit reached")
+	}
+	subscription := &pluginSubscriber{events: make(chan domain.Event, chatEventQueueSize)}
+	m.pluginSubscribers[subscription] = struct{}{}
+	cleanup := func() {
+		m.mu.Lock()
+		delete(m.pluginSubscribers, subscription)
+		close(subscription.events)
+		m.mu.Unlock()
+	}
+	return subscription.events, cleanup, nil
+}
+
 func (m *Manager) Subscribe() (<-chan domain.Event, <-chan domain.Event, func(), error) {
 	m.mu.Lock()
 	if len(m.subscribers) >= maxSubscribers {

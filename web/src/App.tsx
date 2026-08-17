@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { ChevronRight, Globe2, Plus, Radio, Telescope } from 'lucide-react'
+import { ChevronRight, Code2, Globe2, Plus, Plug, Radio, Telescope } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Toaster, toast } from 'sonner'
 import '@/i18n'
@@ -10,12 +10,15 @@ import {
   DEFAULT_NICKNAME,
   DEFAULT_PORT,
   MAX_CHAT_MESSAGES,
+  PLUGIN_EVENT,
+  PLUGIN_LOG,
+  PLUGIN_STATUS,
   STATUS_CONNECTED,
   STATUS_ERROR,
 } from '@/constants'
 import { changeLanguage, supportedLanguages } from '@/i18n'
 import type { SupportedLanguage } from '@/i18n'
-import type { Server, Snapshot } from '@/types'
+import type { Event, Server, Snapshot } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Card, CardDescription, CardHeader } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -23,6 +26,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { ServerDialog } from '@/features/dialogs/server-dialog'
 import { ServerForm } from '@/features/instances/server-form'
 import { Workspace } from '@/features/workspace/workspace'
+import { PluginConsole } from '@/features/plugins/plugin-console'
+import { PluginManager } from '@/features/plugins/plugin-manager'
 import { InstanceSyncController } from '@/lib/instance-sync'
 
 const defaultServer: Omit<Server, 'id'> = {
@@ -42,6 +47,9 @@ export default function App() {
   const [items, setItems] = useState<Snapshot[]>([])
   const [selected, setSelected] = useState('')
   const [adding, setAdding] = useState(false)
+  const [pluginsOpen, setPluginsOpen] = useState(false)
+  const [debugOpen, setDebugOpen] = useState(false)
+  const [pluginEvents, setPluginEvents] = useState<Event[]>([])
   const [form, setForm] = useState(defaultServer)
   const chatBefore = useRef<Record<string, number | undefined>>({})
   const loadingChat = useRef(new Set<string>())
@@ -60,7 +68,12 @@ export default function App() {
     sync.current = controller
     void controller.reconcile()
     const stop = events(
-      (event) => controller.handle(event),
+      (event) => {
+        controller.handle(event)
+        if (event.type === PLUGIN_EVENT || event.type === PLUGIN_LOG || event.type === PLUGIN_STATUS) {
+          setPluginEvents((current) => [...current, event].slice(-200))
+        }
+      },
       () => void controller.reconcile(),
     )
     return () => {
@@ -127,6 +140,14 @@ export default function App() {
             <p className="text-muted-foreground text-xs">{t('app.subtitle')}</p>
           </div>
           <div className="ml-auto flex items-center gap-2">
+            <Button variant="outline" className="px-2 sm:px-4" onClick={() => setPluginsOpen(true)}>
+              <Plug size={16} />
+              <span className="hidden sm:inline">{t('plugins.open')}</span>
+            </Button>
+            <Button variant="outline" className="px-2 sm:px-4" onClick={() => setDebugOpen(true)}>
+              <Code2 size={16} />
+              <span className="hidden sm:inline">{t('plugins.debugOpen')}</span>
+            </Button>
             <Globe2 className="text-muted-foreground" size={16} />
             <Select
               value={i18n.resolvedLanguage ?? 'en'}
@@ -230,6 +251,14 @@ export default function App() {
           />
         </DialogContent>
       </Dialog>
+      <PluginConsole
+        open={debugOpen}
+        onOpenChange={setDebugOpen}
+        initialInstanceId={selected}
+        instances={items}
+        streamEvents={pluginEvents}
+      />
+      <PluginManager open={pluginsOpen} onOpenChange={setPluginsOpen} streamEvents={pluginEvents} />
     </div>
   )
 }

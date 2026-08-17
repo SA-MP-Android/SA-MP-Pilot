@@ -1,6 +1,15 @@
 import { API_PREFIX, EVENTS_PATH, RECONNECT_INITIAL_MS, RECONNECT_MAX_MS } from './constants'
 import { CHAT_PAGE_SIZE } from './constants'
-import type { ChatPage, Event, InstancePatch, QuickCommand, Server, Snapshot } from './types'
+import type {
+  ChatPage,
+  Event,
+  InstancePatch,
+  PluginDebugResult,
+  PluginInfo,
+  QuickCommand,
+  Server,
+  Snapshot,
+} from './types'
 
 const JSON_CONTENT_TYPE = 'application/json'
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -141,6 +150,16 @@ export const api = {
   },
   action: (id: string, action: string, data: unknown = {}) =>
     request<void>(`${instancePath(id)}/actions/${action}`, { method: 'POST', body: JSON.stringify(data) }),
+  plugins: () => request<PluginInfo[]>('/plugins', { cache: 'no-store' }),
+  debugPlugin: (id: string, instanceId: string, code: string) =>
+    request<PluginDebugResult>(`/plugins/${encodeURIComponent(id)}/debug`, {
+      method: 'POST',
+      body: JSON.stringify({ instanceId, code }),
+    }),
+  startPlugin: (id: string) => request<void>(`/plugins/${encodeURIComponent(id)}/start`, { method: 'POST' }),
+  stopPlugin: (id: string) => request<void>(`/plugins/${encodeURIComponent(id)}/stop`, { method: 'POST' }),
+  restartPlugin: (id: string) =>
+    request<void>(`/plugins/${encodeURIComponent(id)}/restart`, { method: 'POST' }),
 }
 export function events(onEvent: (event: Event) => void, onOpen?: () => void) {
   const protocol = location.protocol === 'https:' ? 'wss' : 'ws'

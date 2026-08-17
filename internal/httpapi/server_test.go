@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/service"
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/store"
@@ -13,7 +14,26 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/SA-MP-Android/SA-MP-Pilot/plugin"
 )
+
+type pluginControllerStub struct{}
+
+func (pluginControllerStub) List() []plugin.Info { return []plugin.Info{} }
+func (pluginControllerStub) Debug(context.Context, string, string, string) (plugin.DebugResult, error) {
+	return plugin.DebugResult{}, nil
+}
+
+func pluginHandler(t *testing.T) http.Handler {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "d.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assets := fstest.MapFS{"index.html": {Data: []byte("app")}}
+	return New(service.New(st), fs.FS(assets), slog.Default(), pluginControllerStub{})
+}
 
 func handler(t *testing.T) http.Handler {
 	t.Helper()
@@ -64,6 +84,17 @@ func TestRejectsUnknownFields(t *testing.T) {
 	h.ServeHTTP(w, r)
 	if w.Code != 400 {
 		t.Fatalf("got %d", w.Code)
+	}
+}
+
+func TestRejectsOversizedPluginDebugCode(t *testing.T) {
+	h := pluginHandler(t)
+	body := `{"code":"` + strings.Repeat("x", plugin.MaxDebugCodeBytes+1) + `"}`
+	r := httptest.NewRequest(http.MethodPost, "/api/plugins/demo/debug", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("got %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
 	}
 }
 

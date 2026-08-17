@@ -5,6 +5,7 @@ import (
 	"flag"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/httpapi"
+	"github.com/SA-MP-Android/SA-MP-Pilot/internal/plugins"
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/service"
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/store"
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/webassets"
@@ -24,7 +26,12 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "HTTP listen address")
 	data := flag.String("data", "", "data directory")
 	web := flag.String("web", "", "frontend directory")
+	pluginDir := flag.String("plugins", "", "plugin directory")
 	flag.Parse()
+	if !isLoopbackListenAddress(*addr) {
+		slog.Error("refusing to expose unauthenticated HTTP API outside loopback", "address", *addr)
+		os.Exit(1)
+	}
 	runtimeDir, e := executableDirectory()
 	if e != nil {
 		slog.Error("executable dir", "error", e)
@@ -45,13 +52,24 @@ func main() {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	manager := service.New(st, service.WithLogDir(logDir))
+	if *pluginDir == "" {
+		*pluginDir = filepath.Join(*data, "plugins")
+	}
+	pluginHost, e := plugins.New(*pluginDir, manager, log)
+	if e != nil {
+		log.Error("open plugin host", "error", e)
+		os.Exit(1)
+	}
+	manager.SetPluginSink(pluginHost)
+	pluginHost.SetObserver(manager.PublishPluginEvent)
+	defer pluginHost.Close()
 	manager.StartAutoConnect()
 	defer manager.Close()
 	var assets fs.FS = webassets.FS
 	if *web != "" {
 		assets = os.DirFS(*web)
 	}
-	srv := &http.Server{Addr: *addr, Handler: httpapi.New(manager, assets, log), ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{Addr: *addr, Handler: httpapi.New(manager, assets, log, pluginHost), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		log.Info("SA-MP-Pilot listening", "version", version, "address", "http://"+*addr)
 		if e := srv.ListenAndServe(); e != nil && e != http.ErrServerClosed {
@@ -65,6 +83,18 @@ func main() {
 	shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutdown)
+}
+
+func isLoopbackListenAddress(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func executableDirectory() (string, error) {

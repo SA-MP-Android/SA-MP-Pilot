@@ -135,5 +135,53 @@ export interface ChatPage {
 export interface Event {
   type: string
   instanceId: string
-  data?: Snapshot | InstancePatch | ChatMessage
+  data?: Snapshot | InstancePatch | ChatMessage | PluginEventEnvelope | PluginLogEvent | PluginStatusEvent
+}
+export interface PluginEventEnvelope {
+  pluginId: string
+  event: {
+    name: string
+    instanceId?: string
+    time: string
+    data?: unknown
+  }
+}
+export interface PluginLogEvent {
+  pluginId: string
+  at: string
+  level: string
+  message: string
+}
+export interface PluginStatusEvent {
+  pluginId: string
+  status: string
+  error?: string
+}
+export interface PluginManifest {
+  id: string
+  name: string
+  version: string
+  description?: string
+  command: string
+  args?: string[]
+  events?: string[]
+  enabled?: boolean
+}
+export interface PluginLog {
+  at: string
+  level: string
+  message: string
+}
+export interface PluginInfo {
+  manifest: PluginManifest
+  status: string
+  error?: string
+  eventsSent: number
+  eventsDropped: number
+  logs?: PluginLog[]
+}
+export interface PluginDebugResult {
+  pluginId: string
+  instanceId?: string
+  result?: unknown
 }
