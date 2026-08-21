@@ -135,6 +135,11 @@ All client payloads use camelCase. IDs inside entity payloads are named `id`; `p
 | `client.vehicle.state` | `{ inVehicle, passenger, vehicleId }`; `vehicleId` is `-1` when not in a vehicle |
 | `client.spawned` | `{}` |
 | `client.vehicle.sync` | `{ id, modelId, x, y, z, health }` |
+| `client.movement.started` | `{ taskId, kind, state, x, y, z, targetX, targetY, targetZ, progress }` |
+| `client.movement.progress` | Same movement payload, emitted at a throttled progress cadence |
+| `client.movement.completed` | Same movement payload with `progress: 1` |
+| `client.movement.stopped` | Same movement payload; emitted when a task is cancelled or replaced |
+| `client.movement.failed` | Same movement payload with a non-empty `error` |
 
 Color values are eight-digit strings such as `#11223344`. Chat color is optional when the server packet does not provide one. Dialog event data intentionally excludes the internal raw encoded message; the host uses that data internally when responding to list dialogs.
 
@@ -156,7 +161,13 @@ await instance.refreshScores()
 await instance.setKeys(0)
 await instance.setAFK(true)
 await instance.teleport(1, 2, 3)
-await instance.enterVehicle(411)
+const vehicle = (await instance.getSnapshot()).vehicles.find((item) => item.distance <= 4.5)
+if (!vehicle) throw new Error('no nearby vehicle')
+await instance.enterVehicle(vehicle.id)
+// Observe client.vehicle.state with inVehicle: true before treating entry as confirmed.
+const walk = await instance.walkTo(10, 20, 3, { speed: 1.4, tolerance: 0.35 })
+const drive = await instance.driveTo(100, 200, 5, { vehicleId: vehicle.id, speed: 12, tolerance: 1 })
+await instance.stopMovement()
 await instance.exitVehicle()
 await instance.respondDialog(12, 1, 0, 'password')
 await instance.clickPlayer(42)
@@ -165,7 +176,13 @@ await instance.addCommand({ label: 'Help', command: '/help' })
 await instance.deleteCommand(commandId)
 ```
 
-`instance.call(method, params)` is available for forward-compatible or generic calls. `instance.action(action, params)` supports the current UI actions `chat`, `spawn`, `keys`, `afk`, `teleport`, `enterVehicle`, `exitVehicle`, `dialog`, `textDraw`, `clickPlayer`, `deferDialog`, `showDialog`, and `dismissDialog`.
+`walkTo` and `driveTo` return a task ID immediately. They run one straight-line movement task per instance; starting a new task replaces the current one. `driveTo` requests the driver seat through the normal `instance.enterVehicle` RPC and mirrors the normal client's in-car state after that request is sent; a server-side correction can still end the task. It is rejected immediately if the client is currently a passenger. The task ends when the target tolerance is reached, or when `stopMovement`, a server position correction, AFK, or a disconnect interrupts it. These helpers do not perform collision or path finding, so they require no game assets or map downloads.
+
+`enterVehicle` returns after the request is sent; use `client.vehicle.state` to observe the server confirmation before issuing a dependent action.
+
+Vehicle IDs are server entity IDs from `snapshot.vehicles[].id`, not GTA model IDs such as `411`. The vehicle should be streamed and within normal entry range before calling `enterVehicle` or `driveTo`.
+
+`instance.call(method, params)` is available for forward-compatible or generic calls. `instance.action(action, params)` supports the current UI actions `chat`, `spawn`, `keys`, `afk`, `teleport`, `enterVehicle`, `exitVehicle`, `walkTo`, `driveTo`, `stopMovement`, `dialog`, `textDraw`, `clickPlayer`, `deferDialog`, `showDialog`, and `dismissDialog`.
 
 ### Instance management
 
@@ -194,6 +211,7 @@ Low-level method names are:
 | `instance.setKeys` / `instance.setAFK` | Control input state |
 | `instance.teleport` | Teleport and synchronize |
 | `instance.enterVehicle` / `instance.exitVehicle` | Vehicle control |
+| `instance.walkTo` / `instance.driveTo` / `instance.stopMovement` | Start or cancel plugin-controlled straight-line movement |
 | `instance.respondDialog` | Respond to a Dialog |
 | `instance.clickPlayer` / `instance.clickTextDraw` | Click UI targets |
 | `instance.commands.add` / `instance.commands.delete` | Manage Quick Commands |

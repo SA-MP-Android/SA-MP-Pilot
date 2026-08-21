@@ -47,6 +47,47 @@ func TestEncodeOnFootLayout(t *testing.T) {
 	}
 }
 
+func TestEncodePassengerLayout(t *testing.T) {
+	payload := encodePassengerFrame(passengerFrame{
+		vehicleID: 42, driveBy: 1, seatID: 2, additionalKey: 3, weapon: 22,
+		playerHealth: 100, playerArmour: 0, lrAnalog: 4, udAnalog: 5, keys: 6,
+		position: [3]float32{1, 2, 3},
+	})
+	if len(payload) != 25 {
+		t.Fatalf("payload length = %d, want 25", len(payload))
+	}
+	if payload[0] != packetPassengerSync {
+		t.Fatalf("packet ID = %d", payload[0])
+	}
+	if got := binary.LittleEndian.Uint16(payload[1:3]); got != 42 {
+		t.Fatalf("vehicle ID = %d, want 42", got)
+	}
+	if got := payload[3:5]; got[0] != 0x42 || got[1] != 0xd6 {
+		t.Fatalf("packed passenger fields = %#x %#x, want 0x42 0xd6", got[0], got[1])
+	}
+	if payload[5] != 100 || payload[6] != 0 {
+		t.Fatalf("health/armour = %d/%d", payload[5], payload[6])
+	}
+}
+
+func TestEncodeVehicleLayout(t *testing.T) {
+	payload := encodeVehicleFrame(vehicleFrame{
+		vehicleID: 42, quaternion: [4]float32{1, 0, 0, 0},
+		position: [3]float32{1, 2, 3}, velocity: [3]float32{0.24, 0, 0}, vehicleHealth: 1000,
+		playerHealth: 100, landingGear: 1,
+	}, 0)
+	if payload[0] != packetVehicleSync {
+		t.Fatalf("packet ID = %d", payload[0])
+	}
+	if len(payload) != 64 {
+		t.Fatalf("zero-velocity payload length = %d, want 64", len(payload))
+	}
+	gotVelocity := math.Float32frombits(binary.LittleEndian.Uint32(payload[37:41]))
+	if gotVelocity != 0.24 {
+		t.Fatalf("move speed = %v, want 0.24", gotVelocity)
+	}
+}
+
 func TestDecodePlayerSync(t *testing.T) {
 	w := raknet.Writer{}
 	w.Uint8(packetPlayerSync)
@@ -273,6 +314,30 @@ func TestDecodePutPlayerInVehicle(t *testing.T) {
 	state := event.Data.(VehicleStateEvent)
 	if !state.InVehicle || !state.Passenger || state.VehicleID != 42 {
 		t.Fatalf("vehicle state = %+v", state)
+	}
+}
+
+func TestSetVehicleStateUsesStreamedVehicleTransform(t *testing.T) {
+	c := &Client{
+		vehicles: map[uint16]VehicleEvent{
+			42: {ID: 42, X: 10, Y: -4, Z: 3, Angle: 90, Health: 875},
+		},
+	}
+	c.setVehicleState(42, 0)
+	if !c.inVehicle || c.passenger || c.vehicleID != 42 {
+		t.Fatalf("unexpected driver state: %+v", c)
+	}
+	if c.position != [3]float32{10, -4, 3} {
+		t.Fatalf("position = %v, want streamed vehicle position", c.position)
+	}
+	if c.vehicleHealth != 875 || c.vehicleQuaternion != yawQuaternion(90) {
+		t.Fatalf("vehicle transform = health %v quaternion %v", c.vehicleHealth, c.vehicleQuaternion)
+	}
+}
+
+func TestPlayerSyncUsesRaksampOrderingChannel(t *testing.T) {
+	if playerSyncChannel != 1 {
+		t.Fatalf("player sync ordering channel = %d, want 1", playerSyncChannel)
 	}
 }
 

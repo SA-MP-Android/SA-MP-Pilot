@@ -8,7 +8,7 @@ The backend is written in Go and implements SA-MP/RakNet communication. The fron
 
 | Area | Capabilities |
 | --- | --- |
-| Client | Multiple instances, auto-connect, chat, commands, player lists, Dialogs, TextDraws, vehicles, nearby entities, AFK, and teleportation |
+| Client | Multiple instances, auto-connect, chat, commands, player lists, Dialogs, TextDraws, vehicles, nearby entities, AFK, teleportation, and plugin-controlled straight-line movement |
 | Protocol | Reliable RakNet transport, ordering channels, retransmission, split-packet reassembly, RPC, SA-MP authentication, and text encodings |
 | Automation | JavaScript plugins, event subscriptions, instance APIs, hot reload, and a plugin debug console |
 | Frontend | English, Simplified Chinese, and Russian; live WebSocket state; responsive layout |
@@ -71,7 +71,7 @@ At runtime, the data directory contains:
 
 ## Plugin System
 
-Plugins are separate child processes, with Node.js/JavaScript as the recommended language. They can subscribe to client events and use instance APIs for chat, Dialogs, AFK, vehicles, teleportation, instance management, and other automation tasks. Plugin event payloads use a stable camelCase JSON contract; plugin configuration and persistence remain owned by each plugin.
+Plugins are separate child processes, with Node.js/JavaScript as the recommended language. They can subscribe to client events and use instance APIs for chat, Dialogs, AFK, vehicles, teleportation, straight-line walking/driving, instance management, and other automation tasks. Plugin event payloads use a stable camelCase JSON contract; plugin configuration and persistence remain owned by each plugin.
 
 See [PLUGINS.md](PLUGINS.md) for the complete plugin documentation, including the manifest, events, APIs, debugging, and the wire protocol.
 

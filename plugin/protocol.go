@@ -37,36 +37,42 @@ const (
 )
 
 const (
-	EventInstanceCreated     = "instance.created"
-	EventInstanceUpdated     = "instance.updated"
-	EventInstanceDeleted     = "instance.deleted"
-	EventChatMessage         = "chat.message"
-	EventChatReset           = "chat.reset"
-	EventClientPrefix        = "client."
-	EventClientJoined        = "client.joined"
-	EventClientChat          = "client.chat"
-	EventClientPlayerJoin    = "client.player.join"
-	EventClientPlayerQuit    = "client.player.quit"
-	EventClientScores        = "client.scores"
-	EventClientDialog        = "client.dialog"
-	EventClientDisconnected  = "client.disconnected"
-	EventClientProtocolError = "client.protocol.error"
-	EventClientTextDrawShow  = "client.textdraw.show"
-	EventClientTextDrawHide  = "client.textdraw.hide"
-	EventClientTextDrawText  = "client.textdraw.text"
-	EventClientObjectAdd     = "client.object.add"
-	EventClientObjectRemove  = "client.object.remove"
-	EventClientVehicleAdd    = "client.vehicle.add"
-	EventClientVehicleRemove = "client.vehicle.remove"
-	EventClientPlayerSync    = "client.player.sync"
-	EventClientPosition      = "client.position"
-	EventClientAppearance    = "client.appearance"
-	EventClientVehicleState  = "client.vehicle.state"
-	EventClientSpawned       = "client.spawned"
-	EventClientVehicleSync   = "client.vehicle.sync"
-	EventPluginEvent         = "plugin.event"
-	EventPluginLog           = "plugin.log"
-	EventPluginStatus        = "plugin.status"
+	EventInstanceCreated        = "instance.created"
+	EventInstanceUpdated        = "instance.updated"
+	EventInstanceDeleted        = "instance.deleted"
+	EventChatMessage            = "chat.message"
+	EventChatReset              = "chat.reset"
+	EventClientPrefix           = "client."
+	EventClientJoined           = "client.joined"
+	EventClientChat             = "client.chat"
+	EventClientPlayerJoin       = "client.player.join"
+	EventClientPlayerQuit       = "client.player.quit"
+	EventClientScores           = "client.scores"
+	EventClientDialog           = "client.dialog"
+	EventClientDisconnected     = "client.disconnected"
+	EventClientProtocolError    = "client.protocol.error"
+	EventClientTextDrawShow     = "client.textdraw.show"
+	EventClientTextDrawHide     = "client.textdraw.hide"
+	EventClientTextDrawText     = "client.textdraw.text"
+	EventClientObjectAdd        = "client.object.add"
+	EventClientObjectRemove     = "client.object.remove"
+	EventClientVehicleAdd       = "client.vehicle.add"
+	EventClientVehicleRemove    = "client.vehicle.remove"
+	EventClientPlayerSync       = "client.player.sync"
+	EventClientPosition         = "client.position"
+	EventClientAppearance       = "client.appearance"
+	EventClientVehicleState     = "client.vehicle.state"
+	EventClientSpawned          = "client.spawned"
+	EventClientVehicleSync      = "client.vehicle.sync"
+	EventClientMovement         = "client.movement"
+	EventClientMovementStart    = "client.movement.started"
+	EventClientMovementProgress = "client.movement.progress"
+	EventClientMovementComplete = "client.movement.completed"
+	EventClientMovementStopped  = "client.movement.stopped"
+	EventClientMovementFailed   = "client.movement.failed"
+	EventPluginEvent            = "plugin.event"
+	EventPluginLog              = "plugin.log"
+	EventPluginStatus           = "plugin.status"
 )
 
 const (
@@ -84,6 +90,9 @@ const (
 	MethodTeleport       = "instance.teleport"
 	MethodEnterVehicle   = "instance.enterVehicle"
 	MethodExitVehicle    = "instance.exitVehicle"
+	MethodWalkTo         = "instance.walkTo"
+	MethodDriveTo        = "instance.driveTo"
+	MethodStopMovement   = "instance.stopMovement"
 	MethodRespondDialog  = "instance.respondDialog"
 	MethodClickPlayer    = "instance.clickPlayer"
 	MethodClickTextDraw  = "instance.clickTextDraw"
@@ -258,6 +267,20 @@ type VehicleStateEventData struct {
 	InVehicle bool `json:"inVehicle"`
 	Passenger bool `json:"passenger"`
 	VehicleID int  `json:"vehicleId"`
+}
+
+type MovementEventData struct {
+	TaskID   uint64  `json:"taskId"`
+	Kind     string  `json:"kind"`
+	State    string  `json:"state"`
+	X        float32 `json:"x"`
+	Y        float32 `json:"y"`
+	Z        float32 `json:"z"`
+	TargetX  float32 `json:"targetX"`
+	TargetY  float32 `json:"targetY"`
+	TargetZ  float32 `json:"targetZ"`
+	Progress float32 `json:"progress"`
+	Error    string  `json:"error,omitempty"`
 }
 
 type ReasonEventData struct {

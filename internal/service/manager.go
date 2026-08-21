@@ -303,13 +303,17 @@ func (m *Manager) Delete(id string) error {
 		return errors.New("instance not found")
 	}
 	i.mu.Lock()
-	if i.cancel != nil {
-		i.cancel()
-	}
-	if i.client != nil {
-		_ = i.client.Close()
-	}
+	cancel := i.cancel
+	client := i.client
+	i.cancel = nil
+	i.client = nil
 	i.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if client != nil {
+		_ = client.Close()
+	}
 	if err := m.store.Update(func(d *store.Data) error {
 		d.Servers = filterServers(d.Servers, id)
 		d.Commands = filterCommands(d.Commands, id)
@@ -354,9 +358,10 @@ func (m *Manager) Connect(id string) error {
 	i.mu.Unlock()
 	m.emit(domain.Event{Type: domain.EventChatReset, InstanceID: id})
 	i.mu.Lock()
-	if i.cancel != nil {
-		i.cancel()
-	}
+	oldCancel := i.cancel
+	oldClient := i.client
+	i.cancel = nil
+	i.client = nil
 	ctx, cancel := context.WithCancel(context.Background())
 	i.cancel = cancel
 	i.snap.Connection = domain.Connection{Status: domain.StatusConnecting}
@@ -364,6 +369,12 @@ func (m *Manager) Connect(id string) error {
 	s := i.snap.Server
 	m.appendChat(i, fmt.Sprintf("Connecting to %s:%d...", s.Host, s.Port), defaultChatColor)
 	i.mu.Unlock()
+	if oldCancel != nil {
+		oldCancel()
+	}
+	if oldClient != nil {
+		_ = oldClient.Close()
+	}
 	m.publish(id, i)
 	go m.connect(ctx, id, i, s)
 	go m.publishWorker(ctx, id, i)
@@ -540,6 +551,16 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 			recalculateNearby(i)
 			publishSnapshot = false
 			markDirty(i)
+		case samp.EventMovement:
+			v := event.Data.(samp.MotionEvent)
+			i.position = v.Position
+			local := findPlayer(i.snap.Players, i.playerID)
+			local.ID, local.X, local.Y, local.Z = i.playerID, v.Position[0], v.Position[1], v.Position[2]
+			i.snap.Players = upsertPlayer(i.snap.Players, local)
+			i.snap.Players = sortPlayers(i.snap.Players, i.playerID)
+			recalculateNearby(i)
+			publishSnapshot = false
+			markDirty(i)
 		case samp.EventVehicleState:
 			v := event.Data.(samp.VehicleStateEvent)
 			vehicleID := domain.InvalidVehicleID
@@ -589,7 +610,9 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 			publishSnapshot = false
 			markDirty(i)
 		case samp.EventDisconnected:
-			i.client = nil
+			if i.client == client {
+				i.client = nil
+			}
 			if ctx.Err() == nil {
 				i.snap.Connection = domain.Connection{Status: domain.StatusDisconnected}
 				resetConnectionState(i)
@@ -843,17 +866,19 @@ func (m *Manager) Disconnect(id string) error {
 		return errors.New("instance not found")
 	}
 	i.mu.Lock()
-	if i.cancel != nil {
-		i.cancel()
-		i.cancel = nil
-	}
-	if i.client != nil {
-		_ = i.client.Close()
-		i.client = nil
-	}
+	cancel := i.cancel
+	client := i.client
+	i.cancel = nil
+	i.client = nil
 	i.snap.Connection = domain.Connection{Status: domain.StatusDisconnected}
 	resetConnectionState(i)
 	i.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if client != nil {
+		_ = client.Close()
+	}
 	m.publish(id, i)
 	return nil
 }
@@ -977,6 +1002,10 @@ func (m *Manager) action(ctx context.Context, id, action string, p map[string]an
 			}
 		}
 		i.mu.Unlock()
+		// A direct vehicle transition must cancel a previous walk/drive task;
+		// otherwise its next tick can overwrite the vehicle position and make
+		// the server remove the player immediately after entry.
+		client.StopMovement()
 		requestCtx, cancel := actionContext(ctx)
 		actionErr := client.EnterVehicle(requestCtx, vehicleID, passenger)
 		cancel()
@@ -984,9 +1013,9 @@ func (m *Manager) action(ctx context.Context, id, action string, p map[string]an
 			return actionErr
 		}
 		i.mu.Lock()
-		i.snap.VehicleState = domain.VehicleState{InVehicle: true, VehicleID: int(vehicleID), Passenger: passenger}
 	case domain.ActionExitVehicle:
 		i.mu.Unlock()
+		client.StopMovement()
 		requestCtx, cancel := actionContext(ctx)
 		err := client.ExitVehicle(requestCtx)
 		cancel()
@@ -994,7 +1023,10 @@ func (m *Manager) action(ctx context.Context, id, action string, p map[string]an
 			return err
 		}
 		i.mu.Lock()
-		i.snap.VehicleState = domain.VehicleState{VehicleID: domain.InvalidVehicleID}
+	case domain.ActionStopMovement:
+		i.mu.Unlock()
+		client.StopMovement()
+		return nil
 	case domain.ActionDialog:
 		dialogValue, err := requiredInteger(p, "dialogId", -1<<15, 1<<15-1)
 		buttonValue, errButton := requiredInteger(p, "buttonId", 0, int64(^uint8(0)))
@@ -1225,6 +1257,9 @@ func (m *Manager) InvokePluginAPI(ctx context.Context, instanceID, method string
 				return nil, errors.New("params must be an object")
 			}
 		}
+		if action == domain.ActionWalkTo || action == domain.ActionDriveTo {
+			return m.startMotion(ctx, instanceID, action, actionParams)
+		}
 		return nil, m.action(ctx, instanceID, action, actionParams)
 	case plugin.MethodSendChat:
 		text, err := requiredString(params, "text")
@@ -1245,11 +1280,87 @@ func (m *Manager) InvokePluginAPI(ctx context.Context, instanceID, method string
 		return nil, m.action(ctx, instanceID, domain.ActionSpawn, nil)
 	case plugin.MethodRefreshScores:
 		return nil, m.RefreshScores(ctx, instanceID)
+	case plugin.MethodWalkTo:
+		return m.startMotion(ctx, instanceID, domain.ActionWalkTo, params)
+	case plugin.MethodDriveTo:
+		return m.startMotion(ctx, instanceID, domain.ActionDriveTo, params)
+	case plugin.MethodStopMovement:
+		return nil, m.action(ctx, instanceID, domain.ActionStopMovement, params)
 	case plugin.MethodSetKeys, plugin.MethodSetAFK, plugin.MethodTeleport, plugin.MethodEnterVehicle, plugin.MethodExitVehicle, plugin.MethodRespondDialog, plugin.MethodClickPlayer, plugin.MethodClickTextDraw:
 		return nil, m.action(ctx, instanceID, pluginAction(method), params)
 	default:
 		return nil, fmt.Errorf("unknown plugin API method %q", method)
 	}
+}
+
+func (m *Manager) startMotion(ctx context.Context, id, action string, p map[string]any) (any, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	i, ok := m.find(id)
+	if !ok {
+		return nil, errors.New("instance not found")
+	}
+	xValue, err := requiredFloat(p, "x")
+	yValue, errY := requiredFloat(p, "y")
+	zValue, errZ := requiredFloat(p, "z")
+	if err != nil || errY != nil || errZ != nil {
+		if err != nil {
+			return nil, err
+		}
+		if errY != nil {
+			return nil, errY
+		}
+		return nil, errZ
+	}
+	speed, err := optionalFloat(p, "speed", 0)
+	if err != nil {
+		return nil, err
+	}
+	tolerance, err := optionalFloat(p, "tolerance", 0)
+	if err != nil {
+		return nil, err
+	}
+	target := [3]float32{float32(xValue), float32(yValue), float32(zValue)}
+	i.mu.Lock()
+	client := i.client
+	connected := i.snap.Connection.Status == domain.StatusConnected
+	vehicleID := uint16(0)
+	if action == domain.ActionDriveTo {
+		if i.snap.VehicleState.InVehicle && i.snap.VehicleState.Passenger {
+			i.mu.Unlock()
+			return nil, samp.ErrMotionNotDriver
+		}
+		if _, exists := p["vehicleId"]; exists {
+			vehicleValue, vehicleErr := requiredInteger(p, "vehicleId", 0, int64(^uint16(0)))
+			if vehicleErr != nil {
+				i.mu.Unlock()
+				return nil, vehicleErr
+			}
+			vehicleID = uint16(vehicleValue)
+		} else if i.snap.VehicleState.InVehicle && !i.snap.VehicleState.Passenger && i.snap.VehicleState.VehicleID >= 0 {
+			vehicleID = uint16(i.snap.VehicleState.VehicleID)
+		} else {
+			i.mu.Unlock()
+			return nil, errors.New("vehicleId is required when the client is not driving")
+		}
+	}
+	if client == nil || !connected {
+		i.mu.Unlock()
+		return nil, errors.New("instance is not connected")
+	}
+	i.mu.Unlock()
+
+	var taskID uint64
+	if action == domain.ActionWalkTo {
+		taskID, err = client.WalkTo(target, speed, tolerance)
+	} else {
+		taskID, err = client.DriveTo(vehicleID, target, speed, tolerance)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"taskId": taskID}, nil
 }
 
 func pluginParams(raw json.RawMessage) (map[string]any, error) {
@@ -1293,6 +1404,17 @@ func requiredFloat(params map[string]any, key string) (float64, error) {
 		return 0, fmt.Errorf("%s must be a finite number", key)
 	}
 	return value, nil
+}
+
+func optionalFloat(params map[string]any, key string, fallback float32) (float32, error) {
+	if _, exists := params[key]; !exists {
+		return fallback, nil
+	}
+	value, err := requiredFloat(params, key)
+	if err != nil {
+		return 0, err
+	}
+	return float32(value), nil
 }
 
 func requiredInteger(params map[string]any, key string, minimum, maximum int64) (int64, error) {
@@ -1443,7 +1565,31 @@ func (m *Manager) emitClientPluginEvent(instanceID string, event samp.Event) {
 		return
 	}
 	data := pluginEventData(event)
-	sink.Emit(plugin.Event{Name: plugin.EventClientPrefix + string(event.Type), InstanceID: instanceID, Time: time.Now(), Data: data})
+	sink.Emit(plugin.Event{Name: clientPluginEventName(event), InstanceID: instanceID, Time: time.Now(), Data: data})
+}
+
+func clientPluginEventName(event samp.Event) string {
+	if event.Type != samp.EventMovement {
+		return plugin.EventClientPrefix + string(event.Type)
+	}
+	value, ok := event.Data.(samp.MotionEvent)
+	if !ok {
+		return plugin.EventClientMovement
+	}
+	switch value.State {
+	case samp.MotionStarted:
+		return plugin.EventClientMovementStart
+	case samp.MotionProgress:
+		return plugin.EventClientMovementProgress
+	case samp.MotionCompleted:
+		return plugin.EventClientMovementComplete
+	case samp.MotionStopped:
+		return plugin.EventClientMovementStopped
+	case samp.MotionFailed:
+		return plugin.EventClientMovementFailed
+	default:
+		return plugin.EventClientMovement
+	}
 }
 
 // pluginEventData is the compatibility boundary between the internal SA-MP
@@ -1554,6 +1700,14 @@ func pluginEventData(event samp.Event) any {
 			vehicleID = int(value.VehicleID)
 		}
 		return plugin.VehicleStateEventData{InVehicle: value.InVehicle, Passenger: value.Passenger, VehicleID: vehicleID}
+	case samp.EventMovement:
+		value := event.Data.(samp.MotionEvent)
+		return plugin.MovementEventData{
+			TaskID: value.TaskID, Kind: string(value.Kind), State: string(value.State),
+			X: value.Position[0], Y: value.Position[1], Z: value.Position[2],
+			TargetX: value.Target[0], TargetY: value.Target[1], TargetZ: value.Target[2],
+			Progress: value.Progress, Error: value.Error,
+		}
 	case samp.EventSpawned:
 		return struct{}{}
 	case samp.EventVehicleSync:

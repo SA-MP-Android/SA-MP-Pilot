@@ -203,6 +203,22 @@ func TestPluginClientEventsUseStableCamelCasePayloads(t *testing.T) {
 	if strings.Contains(string(encoded), "RawMessage") || strings.Contains(string(encoded), "private") {
 		t.Fatalf("dialog payload leaked decoder internals: %s", encoded)
 	}
+
+	movement := samp.MotionEvent{
+		TaskID: 7, Kind: samp.MotionWalk, State: samp.MotionStarted,
+		Position: [3]float32{1, 2, 3}, Target: [3]float32{4, 5, 6},
+	}
+	event := samp.Event{Type: samp.EventMovement, Data: movement}
+	if got := clientPluginEventName(event); got != plugin.EventClientMovementStart {
+		t.Fatalf("movement event name = %q, want %q", got, plugin.EventClientMovementStart)
+	}
+	encoded, err = json.Marshal(pluginEventData(event))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(encoded); got != `{"taskId":7,"kind":"walk","state":"started","x":1,"y":2,"z":3,"targetX":4,"targetY":5,"targetZ":6,"progress":0}` {
+		t.Fatalf("movement plugin payload = %s", got)
+	}
 }
 
 func TestPluginAPIManagesInstancesAndCommands(t *testing.T) {

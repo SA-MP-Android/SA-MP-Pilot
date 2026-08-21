@@ -33,18 +33,20 @@ const (
 	defaultDialTimeout                   = 10 * time.Second
 	readPollInterval                     = 100 * time.Millisecond
 	resendInterval                       = 400 * time.Millisecond
-	disconnectWait                       = 100 * time.Millisecond
-	maxDatagramSize                      = 64 * 1024
-	outboundQueueSize                    = 128
-	inboundQueueSize                     = 256
-	maxPendingReliable                   = 1024
-	maxReceivedWindow                    = 4096
-	maxOrderedFrames                     = 1024
-	maxSplitAssemblies                   = 64
-	maxSplitAssemblyBytes                = 1 << 20
-	maxSplitBufferedBytes                = 4 << 20
-	maxResendAttempts                    = 20
-	splitAssemblyTTL                     = 10 * time.Second
+	// RakNet's normal client Disconnect(500) gives the server time to receive
+	// the ID_DISCONNECTION_NOTIFICATION before the UDP socket is closed.
+	disconnectWait        = 500 * time.Millisecond
+	maxDatagramSize       = 64 * 1024
+	outboundQueueSize     = 128
+	inboundQueueSize      = 256
+	maxPendingReliable    = 1024
+	maxReceivedWindow     = 4096
+	maxOrderedFrames      = 1024
+	maxSplitAssemblies    = 64
+	maxSplitAssemblyBytes = 1 << 20
+	maxSplitBufferedBytes = 4 << 20
+	maxResendAttempts     = 20
+	splitAssemblyTTL      = 10 * time.Second
 )
 
 var (
@@ -93,6 +95,7 @@ type Conn struct {
 	udp          *net.UDPConn
 	ctx          context.Context
 	cancel       context.CancelFunc
+	disconnect   chan struct{}
 	send         chan outbound
 	recv         chan []byte
 	ready        chan error
@@ -125,7 +128,7 @@ func Dial(ctx context.Context, address, password string) (*Conn, error) {
 		return nil, e
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
-	c := &Conn{udp: udp, ctx: runCtx, cancel: cancel, send: make(chan outbound, outboundQueueSize), recv: make(chan []byte, inboundQueueSize), ready: make(chan error, 1), done: make(chan struct{}), remotePort: uint16(remote.Port)}
+	c := &Conn{udp: udp, ctx: runCtx, cancel: cancel, disconnect: make(chan struct{}), send: make(chan outbound, outboundQueueSize), recv: make(chan []byte, inboundQueueSize), ready: make(chan error, 1), done: make(chan struct{}), remotePort: uint16(remote.Port)}
 	copy(c.remoteIPv4[:], remote.IP.To4())
 	go c.run(password)
 	return c, nil
@@ -179,6 +182,8 @@ func (c *Conn) WriteChannel(ctx context.Context, payload []byte, reliability Rel
 	request := outbound{payload: append([]byte(nil), payload...), reliability: reliability, channel: channel, result: r}
 	select {
 	case c.send <- request:
+	case <-c.disconnect:
+		return ErrClosed
 	case <-c.done:
 		return ErrClosed
 	case <-ctx.Done():
@@ -187,6 +192,8 @@ func (c *Conn) WriteChannel(ctx context.Context, payload []byte, reliability Rel
 	select {
 	case e := <-r:
 		return e
+	case <-c.disconnect:
+		return ErrClosed
 	case <-c.done:
 		return ErrClosed
 	case <-ctx.Done():
@@ -206,7 +213,19 @@ func (c *Conn) Read(ctx context.Context) ([]byte, error) {
 		return nil, ctx.Err()
 	}
 }
-func (c *Conn) Close() error { c.closeOnce.Do(func() { c.cancel(); <-c.done }); return nil }
+
+// Close mirrors RakPeer::Disconnect(500) from the native SA-MP client. The
+// network loop owns the UDP socket and must send the reliable ordered
+// ID_DISCONNECTION_NOTIFICATION before it exits; closing the socket first is
+// indistinguishable from a timeout to the server.
+func (c *Conn) Close() error {
+	c.closeOnce.Do(func() {
+		close(c.disconnect)
+		<-c.done
+		c.cancel()
+	})
+	return nil
+}
 func (c *Conn) run(password string) {
 	defer close(c.done)
 	defer close(c.recv)
@@ -215,12 +234,18 @@ func (c *Conn) run(password string) {
 	received := map[uint16]struct{}{}
 	receiver := newReceiverState()
 	var nextMessage uint16
+	readySent := false
+	gracefulDisconnect := func() {
+		if !readySent {
+			return
+		}
+		c.drainGracefulDisconnect(&nextMessage, pending, received, receiver)
+	}
 	connectionPayload := append([]byte{packetConnectionRequest}, []byte(password)...)
 	_ = c.queueFrame(connectionPayload, Reliable, 0, &nextMessage, pending)
 	ticker := time.NewTicker(readPollInterval)
 	defer ticker.Stop()
 	buffer := make([]byte, maxDatagramSize)
-	readySent := false
 	for {
 		_ = c.udp.SetReadDeadline(time.Now().Add(readPollInterval))
 		n, e := c.udp.Read(buffer)
@@ -269,6 +294,9 @@ func (c *Conn) run(password string) {
 									readySent = true
 								}
 								if !c.deliver(payload) {
+									if c.ctx.Err() != nil || c.disconnectRequested() {
+										gracefulDisconnect()
+									}
 									return
 								}
 							case packetDisconnection:
@@ -299,6 +327,9 @@ func (c *Conn) run(password string) {
 								// RakNet transport control packet; do not expose it as application data.
 							default:
 								if !c.deliver(payload) {
+									if c.ctx.Err() != nil || c.disconnectRequested() {
+										gracefulDisconnect()
+									}
 									return
 								}
 							}
@@ -308,10 +339,11 @@ func (c *Conn) run(password string) {
 			}
 		}
 		select {
+		case <-c.disconnect:
+			gracefulDisconnect()
+			return
 		case <-c.ctx.Done():
-			disconnect := []byte{packetDisconnection}
-			_ = c.queueFrame(disconnect, ReliableOrdered, 0, &nextMessage, pending)
-			time.Sleep(disconnectWait)
+			gracefulDisconnect()
 			return
 		case req := <-c.send:
 			if len(pending) >= maxPendingReliable && req.reliability.reliable() {
@@ -358,6 +390,102 @@ func connectedPong(ping []byte, now time.Time) ([]byte, error) {
 	binary.LittleEndian.PutUint32(pong[connectedPingSize:], uint32(now.UnixMilli()))
 	return pong, nil
 }
+
+// drainGracefulDisconnect mirrors RakPeer::Disconnect(500). The disconnect
+// notification is a reliable ordered RakNet message, but sending it once and
+// sleeping is not enough: the server may still have reliable messages waiting
+// for an ACK. The normal client keeps its network loop alive during the grace
+// period, so do the same here.
+func (c *Conn) drainGracefulDisconnect(next *uint16, pending map[uint16]*pendingFrame, received map[uint16]struct{}, receiver *receiverState) {
+	if err := c.queueFrame([]byte{packetDisconnection}, ReliableOrdered, 0, next, pending); err != nil {
+		return
+	}
+	deadline := time.Now().Add(disconnectWait)
+	nextResend := time.Now().Add(resendInterval)
+	buffer := make([]byte, maxDatagramSize)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return
+		}
+		poll := readPollInterval
+		if remaining < poll {
+			poll = remaining
+		}
+		_ = c.udp.SetReadDeadline(time.Now().Add(poll))
+		n, err := c.udp.Read(buffer)
+		if err == nil && n > 0 {
+			c.handleDisconnectDatagram(buffer[:n], next, pending, received, receiver)
+		} else if err != nil {
+			if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+				return
+			}
+		}
+		now := time.Now()
+		if !now.Before(nextResend) {
+			c.resendPending(pending, now)
+			nextResend = now.Add(resendInterval)
+		}
+	}
+}
+
+func (c *Conn) handleDisconnectDatagram(data []byte, next *uint16, pending map[uint16]*pendingFrame, received map[uint16]struct{}, receiver *receiverState) {
+	acks, frames, err := DecodeDatagram(data)
+	if err != nil {
+		return
+	}
+	for _, ack := range acks {
+		for id := ack.Min; ; id++ {
+			delete(pending, id)
+			if id == ack.Max {
+				break
+			}
+		}
+	}
+	for _, frame := range frames {
+		if frame.Reliability.reliable() {
+			ack, encodeErr := EncodeDatagram([]Range{{frame.MessageNumber, frame.MessageNumber}}, nil)
+			if encodeErr == nil {
+				_, _ = c.writeDatagram(ack)
+			}
+		}
+		if _, duplicate := received[frame.MessageNumber]; duplicate {
+			continue
+		}
+		received[frame.MessageNumber] = struct{}{}
+		if len(received) > maxReceivedWindow {
+			clear(received)
+			received[frame.MessageNumber] = struct{}{}
+		}
+		for _, payload := range receiver.accept(frame, time.Now()) {
+			if len(payload) == 0 || payload[0] != packetInternalPing {
+				continue
+			}
+			pong, pongErr := connectedPong(payload, time.Now())
+			if pongErr == nil {
+				_ = c.queueFrame(pong, Unreliable, 0, next, pending)
+			}
+		}
+	}
+}
+
+func (c *Conn) resendPending(pending map[uint16]*pendingFrame, now time.Time) {
+	for _, frame := range pending {
+		if now.Sub(frame.sent) < resendInterval || frame.attempts >= maxResendAttempts {
+			continue
+		}
+		data, err := EncodeDatagram(nil, []Frame{frame.frame})
+		if err != nil {
+			continue
+		}
+		if _, err = c.writeDatagram(data); err != nil {
+			continue
+		}
+		frame.sent = now
+		frame.attempts++
+	}
+}
+
 func connectionRejection(id uint8) error {
 	switch id {
 	case packetFailedEncryption:
@@ -387,7 +515,18 @@ func (c *Conn) deliver(payload []byte) bool {
 	select {
 	case c.recv <- append([]byte(nil), payload...):
 		return true
+	case <-c.disconnect:
+		return false
 	case <-c.ctx.Done():
+		return false
+	}
+}
+
+func (c *Conn) disconnectRequested() bool {
+	select {
+	case <-c.disconnect:
+		return true
+	default:
 		return false
 	}
 }

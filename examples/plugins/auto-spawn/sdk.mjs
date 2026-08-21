@@ -48,6 +48,11 @@ export const EVENT_CLIENT_APPEARANCE = 'client.appearance'
 export const EVENT_CLIENT_VEHICLE_STATE = 'client.vehicle.state'
 export const EVENT_CLIENT_SPAWNED = 'client.spawned'
 export const EVENT_CLIENT_VEHICLE_SYNC = 'client.vehicle.sync'
+export const EVENT_CLIENT_MOVEMENT_STARTED = 'client.movement.started'
+export const EVENT_CLIENT_MOVEMENT_PROGRESS = 'client.movement.progress'
+export const EVENT_CLIENT_MOVEMENT_COMPLETED = 'client.movement.completed'
+export const EVENT_CLIENT_MOVEMENT_STOPPED = 'client.movement.stopped'
+export const EVENT_CLIENT_MOVEMENT_FAILED = 'client.movement.failed'
 
 export const METHOD = Object.freeze({
   listInstances: 'instances.list',
@@ -67,6 +72,9 @@ export const METHOD = Object.freeze({
   teleport: 'instance.teleport',
   enterVehicle: 'instance.enterVehicle',
   exitVehicle: 'instance.exitVehicle',
+  walkTo: 'instance.walkTo',
+  driveTo: 'instance.driveTo',
+  stopMovement: 'instance.stopMovement',
   respondDialog: 'instance.respondDialog',
   clickPlayer: 'instance.clickPlayer',
   clickTextDraw: 'instance.clickTextDraw',
@@ -102,6 +110,11 @@ export const EVENTS = Object.freeze({
   clientVehicleState: EVENT_CLIENT_VEHICLE_STATE,
   clientSpawned: EVENT_CLIENT_SPAWNED,
   clientVehicleSync: EVENT_CLIENT_VEHICLE_SYNC,
+  clientMovementStarted: EVENT_CLIENT_MOVEMENT_STARTED,
+  clientMovementProgress: EVENT_CLIENT_MOVEMENT_PROGRESS,
+  clientMovementCompleted: EVENT_CLIENT_MOVEMENT_COMPLETED,
+  clientMovementStopped: EVENT_CLIENT_MOVEMENT_STOPPED,
+  clientMovementFailed: EVENT_CLIENT_MOVEMENT_FAILED,
 })
 
 const handlers = []
@@ -195,7 +208,8 @@ function normalizePattern(pattern) {
   const normalized = pattern.trim()
   if (Buffer.byteLength(normalized, 'utf8') > MAX_SUBSCRIPTION_BYTES) throw new RangeError('event pattern is too large')
   const wildcard = normalized.indexOf('*')
-  if (wildcard >= 0 && (normalized !== '*' || wildcard !== normalized.length - 1 || normalized.indexOf('*', wildcard + 1) >= 0)) {
+  const isSuffixWildcard = wildcard === normalized.length - 1 && normalized.indexOf('*', wildcard + 1) < 0
+  if (wildcard >= 0 && normalized !== '*' && !isSuffixWildcard) {
     throw new TypeError('event pattern must be an exact name, a suffix wildcard, or *')
   }
   return normalized
@@ -260,6 +274,9 @@ export function instanceApi(instanceId) {
     teleport: (x, y, z) => api(METHOD.teleport, instanceId, { x, y, z }),
     enterVehicle: (vehicleId, passenger = false) => api(METHOD.enterVehicle, instanceId, { vehicleId, passenger }),
     exitVehicle: () => api(METHOD.exitVehicle, instanceId),
+    walkTo: (x, y, z, options = {}) => api(METHOD.walkTo, instanceId, { ...options, x, y, z }),
+    driveTo: (x, y, z, options = {}) => api(METHOD.driveTo, instanceId, { ...options, x, y, z }),
+    stopMovement: () => api(METHOD.stopMovement, instanceId),
     respondDialog: (dialogId, buttonId, listItem = 0, inputText = '') =>
       api(METHOD.respondDialog, instanceId, { dialogId, buttonId, listItem, inputText }),
     clickPlayer: (playerId) => api(METHOD.clickPlayer, instanceId, { playerId }),
@@ -290,6 +307,8 @@ async function runDebug(message) {
       dispatch,
       state: debugState,
       log,
+      setTimeout,
+      clearTimeout,
       console: {
         log: (...values) => log('info', values.map(displayValue).join(' ')),
         info: (...values) => log('info', values.map(displayValue).join(' ')),

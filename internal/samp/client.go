@@ -62,12 +62,15 @@ const (
 	packetVehicleSync      uint8  = 200
 	packetPassengerSync    uint8  = 211
 	packetStatsUpdate      uint8  = 205
-	playerSyncChannel      uint8  = 1
+	// The Android client sends on-foot and passenger sync on channel 1. Vehicle
+	// sync remains on channel 0, as in CLocalPlayer::SendInCarFullSyncData.
+	// Enter/exit RPCs use channel 0 independently of the sync stream.
+	playerSyncChannel uint8 = 1
 	// Android's raksamp network loop runs at roughly 30 FPS and the default
 	// SA-MP on-foot send rate is 30 ms. Keep the Go sync cadence close to that
 	// loop so the first sync is emitted by the next tick after RPC_Spawn,
 	// instead of being written from inside the spawn RPC handler.
-	playerSyncInterval              = 33 * time.Millisecond
+	playerSyncInterval              = 30 * time.Millisecond
 	scoreRefreshInterval            = 3 * time.Second
 	statsUpdateInterval             = time.Second
 	targetFramesPerSecond    uint32 = 60
@@ -122,6 +125,7 @@ const (
 	EventVehicleState  EventType = "vehicle.state"
 	EventSpawned       EventType = "spawned"
 	EventVehicleSync   EventType = "vehicle.sync"
+	EventMovement      EventType = "movement"
 )
 
 type Event struct {
@@ -173,6 +177,7 @@ type VehicleEvent struct {
 	ID              uint16
 	ModelID         int32
 	X, Y, Z, Health float32
+	Angle           float32
 }
 type VehicleStateEvent struct {
 	InVehicle bool
@@ -180,31 +185,59 @@ type VehicleStateEvent struct {
 	VehicleID uint16
 }
 type Client struct {
-	conn                 *raknet.Conn
-	codec                encoding.Encoding
-	events               chan Event
-	ctx                  context.Context
-	cancel               context.CancelFunc
-	closeOnce            sync.Once
-	stateMu              sync.RWMutex
-	position             [3]float32
-	keyMask              uint32
-	afk                  bool
-	vehicleID            uint16
-	inVehicle            bool
-	passenger            bool
-	spawned              bool
-	localID              uint16
-	skin                 int32
-	team                 uint8
-	rotation             float32
-	drunkLevel           uint32
-	drunkLevelSet        bool
-	initObserved         bool
-	spawnRequested       bool
-	spawnInfoReady       bool
-	emulatePCClientCheck bool
-	clientCheckStart     time.Time
+	conn                  *raknet.Conn
+	codec                 encoding.Encoding
+	events                chan Event
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	closeOnce             sync.Once
+	stateMu               sync.RWMutex
+	syncMu                sync.Mutex
+	position              [3]float32
+	keyMask               uint32
+	afk                   bool
+	vehicleID             uint16
+	inVehicle             bool
+	passenger             bool
+	vehicleSeat           uint8
+	spawned               bool
+	localID               uint16
+	skin                  int32
+	team                  uint8
+	rotation              float32
+	drunkLevel            uint32
+	drunkLevelSet         bool
+	initObserved          bool
+	spawnRequested        bool
+	spawnInfoReady        bool
+	emulatePCClientCheck  bool
+	clientCheckStart      time.Time
+	vehicles              map[uint16]VehicleEvent
+	motionMu              sync.Mutex
+	motion                *motionTask
+	nextMotionID          uint64
+	onFootVelocity        [3]float32
+	onFootQuaternion      [4]float32
+	onFootLRAnalog        uint16
+	onFootUDAnalog        uint16
+	onFootProtocolKeys    uint16
+	onFootSpecialAction   uint8
+	onFootWeapon          uint8
+	onFootAnimationID     int16
+	onFootAnimationFlags  int16
+	vehicleVelocity       [3]float32
+	vehicleQuaternion     [4]float32
+	vehicleLRAnalog       uint16
+	vehicleUDAnalog       uint16
+	vehicleProtocolKeys   uint16
+	vehicleHealth         float32
+	enterPending          bool
+	enterPendingVehicle   uint16
+	enterPendingPassenger bool
+	enterQueued           bool
+	enterQueuedVehicle    uint16
+	enterQueuedPassenger  bool
+	exitPending           bool
 }
 
 func DialClient(ctx context.Context, address, nickname, password, charset string) (*Client, error) {
@@ -237,6 +270,7 @@ func DialClientWithOptions(ctx context.Context, address, nickname, password, cha
 		cancel:               cancel,
 		emulatePCClientCheck: options.EmulatePCClientCheck,
 		clientCheckStart:     clientCheckStart,
+		vehicles:             make(map[uint16]VehicleEvent),
 	}
 	handshakeCtx, handshakeCancel := context.WithTimeout(ctx, gameHandshakeTimeout)
 	defer handshakeCancel()
@@ -281,7 +315,18 @@ func DialClientWithOptions(ctx context.Context, address, nickname, password, cha
 	return c, nil
 }
 func (c *Client) Events() <-chan Event { return c.events }
-func (c *Client) Close() error         { c.closeOnce.Do(func() { c.cancel(); c.conn.Close() }); return nil }
+func (c *Client) Close() error {
+	c.closeOnce.Do(func() {
+		c.StopMovement()
+		// Keep the client/network loops alive while RakNet performs the same
+		// graceful Disconnect(500) sequence as the native SA-MP client. The
+		// transport must send ID_DISCONNECTION_NOTIFICATION before the upper
+		// layer is cancelled.
+		_ = c.conn.Close()
+		c.cancel()
+	})
+	return nil
+}
 func (c *Client) SendChat(ctx context.Context, text string) error {
 	encoded, e := encodeText(c.codec, text)
 	if e != nil {
@@ -366,7 +411,9 @@ func (c *Client) ClickPlayer(ctx context.Context, playerID uint16) error {
 	w := raknet.Writer{}
 	w.Uint16(playerID)
 	w.Uint8(0)
-	return c.sendRPC(ctx, RPCClickPlayer, &w, raknet.ReliableOrdered)
+	// Match RaksampNativeBridge::nativeSendClickPlayer: RPC 23 is sent as
+	// RELIABLE on ordering channel 0, not RELIABLE_ORDERED.
+	return c.sendRPC(ctx, RPCClickPlayer, &w, raknet.Reliable)
 }
 func (c *Client) ClickTextDraw(ctx context.Context, textDrawID uint16) error {
 	w := raknet.Writer{}
@@ -384,6 +431,9 @@ func (c *Client) SetKeys(ctx context.Context, mask uint32) error {
 	return err
 }
 func (c *Client) SetAFK(enabled bool) {
+	if enabled {
+		c.StopMovement()
+	}
 	c.stateMu.Lock()
 	c.afk = enabled
 	if enabled {
@@ -392,6 +442,7 @@ func (c *Client) SetAFK(enabled bool) {
 	c.stateMu.Unlock()
 }
 func (c *Client) Teleport(ctx context.Context, x, y, z float32) error {
+	c.StopMovement()
 	c.stateMu.Lock()
 	c.position = [3]float32{x, y, z}
 	c.stateMu.Unlock()
@@ -402,15 +453,39 @@ func (c *Client) EnterVehicle(ctx context.Context, vehicleID uint16, passenger b
 	inVehicle := c.inVehicle
 	currentVehicleID := c.vehicleID
 	currentPassenger := c.passenger
+	pending := c.enterPending && c.enterPendingVehicle == vehicleID && c.enterPendingPassenger == passenger
+	queued := c.enterQueued && c.enterQueuedVehicle == vehicleID && c.enterQueuedPassenger == passenger
 	c.stateMu.RUnlock()
 	if inVehicle && currentVehicleID == vehicleID && currentPassenger == passenger {
 		return nil
 	}
+	if pending || queued {
+		return nil
+	}
 	if needsVehicleExit(inVehicle, currentVehicleID, currentPassenger, vehicleID, passenger) {
+		c.stateMu.Lock()
+		c.enterQueued = true
+		c.enterQueuedVehicle = vehicleID
+		c.enterQueuedPassenger = passenger
+		c.stateMu.Unlock()
 		if err := c.ExitVehicle(ctx); err != nil {
+			c.stateMu.Lock()
+			c.enterQueued = false
+			c.stateMu.Unlock()
 			return err
 		}
+		return nil
 	}
+	// Mark the transition before writing the RPC. syncLoop is concurrent with
+	// API calls; it must not emit another on-foot frame between the request and
+	// the first vehicle frame. syncMu also preserves the RPC/frame order on the
+	// shared RakNet ordering channel.
+	c.syncMu.Lock()
+	c.stateMu.Lock()
+	c.enterPending = true
+	c.enterPendingVehicle = vehicleID
+	c.enterPendingPassenger = passenger
+	c.stateMu.Unlock()
 	w := raknet.Writer{}
 	w.Uint16(vehicleID)
 	if passenger {
@@ -419,13 +494,26 @@ func (c *Client) EnterVehicle(ctx context.Context, vehicleID uint16, passenger b
 		w.Uint8(0)
 	}
 	if err := c.sendRPC(ctx, RPCEnterVehicle, &w, raknet.ReliableSequenced); err != nil {
+		c.stateMu.Lock()
+		if c.enterPending && c.enterPendingVehicle == vehicleID && c.enterPendingPassenger == passenger {
+			c.enterPending = false
+		}
+		c.stateMu.Unlock()
+		c.syncMu.Unlock()
 		return err
 	}
-	c.stateMu.Lock()
-	c.vehicleID = vehicleID
-	c.inVehicle = true
-	c.passenger = passenger
-	c.stateMu.Unlock()
+	// RPC_EnterVehicle is the local client's request to begin entering. The
+	// server normally does not echo PutPlayerInVehicle back to the requesting
+	// player; that RPC is for server-forced placement. Mirror the normal client
+	// state immediately so the next sync is vehicle/passenger sync and the UI
+	// does not remain on foot waiting for an RPC that will not arrive.
+	seatID := uint8(0)
+	if passenger {
+		seatID = 1
+	}
+	c.setVehicleState(vehicleID, seatID)
+	c.syncMu.Unlock()
+	c.emit(Event{Type: EventVehicleState, Data: VehicleStateEvent{InVehicle: true, Passenger: passenger, VehicleID: vehicleID}})
 	return nil
 }
 
@@ -435,17 +523,49 @@ func needsVehicleExit(inVehicle bool, currentVehicleID uint16, currentPassenger 
 func (c *Client) ExitVehicle(ctx context.Context) error {
 	c.stateMu.RLock()
 	vehicleID := c.vehicleID
+	inVehicle := c.inVehicle
+	pending := c.exitPending
 	c.stateMu.RUnlock()
+	if !inVehicle {
+		c.stateMu.Lock()
+		c.enterPending = false
+		c.enterQueued = false
+		c.stateMu.Unlock()
+		return nil
+	}
+	if pending {
+		return nil
+	}
+	c.syncMu.Lock()
 	w := raknet.Writer{}
 	w.Uint16(vehicleID)
 	if err := c.sendRPC(ctx, RPCExitVehicle, &w, raknet.ReliableSequenced); err != nil {
+		c.syncMu.Unlock()
 		return err
 	}
+	// As with entering, the normal client changes its local state when the
+	// request is sent. The server's RemoveFromVehicle RPC is reserved for a
+	// server-forced exit and is not the normal acknowledgement path.
 	c.stateMu.Lock()
-	c.vehicleID = 0
-	c.inVehicle = false
-	c.passenger = false
+	queuedVehicle := c.enterQueuedVehicle
+	queuedPassenger := c.enterQueuedPassenger
+	shouldEnter := c.enterQueued
+	c.vehicleID, c.inVehicle, c.passenger, c.vehicleSeat = 0, false, false, 0
+	c.enterPending = false
+	c.exitPending = false
+	c.enterQueued = false
+	c.vehicleVelocity = [3]float32{}
+	c.vehicleQuaternion = [4]float32{}
+	c.vehicleLRAnalog, c.vehicleUDAnalog, c.vehicleProtocolKeys = 0, 0, 0
+	c.vehicleHealth = 0
 	c.stateMu.Unlock()
+	c.syncMu.Unlock()
+	c.emit(Event{Type: EventVehicleState, Data: VehicleStateEvent{}})
+	if shouldEnter && c.ctx != nil {
+		if err := c.EnterVehicle(c.ctx, queuedVehicle, queuedPassenger); err != nil {
+			c.emit(Event{Type: EventProtocolError, Data: err.Error()})
+		}
+	}
 	return nil
 }
 func (c *Client) syncLoop() {
@@ -460,6 +580,7 @@ func (c *Client) syncLoop() {
 			shouldSync := c.spawned && !c.afk
 			c.stateMu.RUnlock()
 			if shouldSync {
+				c.advanceMotion(time.Now())
 				_ = c.sendSync(c.ctx)
 			}
 		}
@@ -478,8 +599,17 @@ func (c *Client) scoreLoop() {
 	}
 }
 func (c *Client) sendSync(ctx context.Context) error {
+	c.syncMu.Lock()
+	defer c.syncMu.Unlock()
 	c.stateMu.RLock()
 	spawned, inVehicle, passenger := c.spawned, c.inVehicle, c.passenger
+	if !inVehicle && c.enterPending {
+		// A normal client changes its local GTA state as soon as the enter
+		// action starts. Mirror that on the wire while waiting for the server
+		// confirmation so no on-foot packet can follow the enter RPC.
+		inVehicle = true
+		passenger = c.enterPendingPassenger
+	}
 	c.stateMu.RUnlock()
 	if !spawned {
 		return nil
@@ -491,81 +621,150 @@ func (c *Client) sendSync(ctx context.Context) error {
 }
 func (c *Client) sendOnFoot(ctx context.Context) error {
 	c.stateMu.RLock()
-	payload := encodeOnFoot(c.position, c.keyMask)
+	frame := onFootFrame{
+		lrAnalog: c.onFootLRAnalog, udAnalog: c.onFootUDAnalog,
+		keys:     c.onFootProtocolKeys | protocolKeys(c.keyMask),
+		position: c.position, quaternion: c.onFootQuaternion,
+		health: defaultPlayerHealth, weapon: c.onFootWeapon | protocolAdditionalKey(c.keyMask)<<6,
+		specialAction: c.onFootSpecialAction, velocity: c.onFootVelocity,
+		animationID: c.onFootAnimationID, animationFlags: c.onFootAnimationFlags,
+	}
 	c.stateMu.RUnlock()
+	payload := encodeOnFootFrame(frame)
 	return c.conn.WriteChannel(ctx, payload, raknet.UnreliableSequenced, playerSyncChannel)
 }
 func (c *Client) sendVehicle(ctx context.Context, passenger bool) error {
 	c.stateMu.RLock()
 	vehicleID, position, mask := c.vehicleID, c.position, c.keyMask
-	c.stateMu.RUnlock()
-	w := raknet.Writer{}
-	if passenger {
-		w.Uint8(packetPassengerSync)
-		w.Uint16(vehicleID)
-		w.Uint8(1)
-		w.Uint8(protocolAdditionalKey(mask) << 6)
-		w.Uint8(defaultPlayerHealth)
-		w.Uint8(0)
-		w.Uint16(0)
-		w.Uint16(0)
-		w.Uint16(protocolVehicleKeys(mask))
-		for _, value := range position {
-			w.Float32(value)
+	vehicleQuaternion := c.vehicleQuaternion
+	vehicleSeat := c.vehicleSeat
+	pendingEntry := !c.inVehicle && c.enterPending
+	if pendingEntry {
+		vehicleID = c.enterPendingVehicle
+		if passenger && vehicleSeat == 0 {
+			vehicleSeat = 1
 		}
-		return c.conn.WriteChannel(ctx, w.Bytes(), raknet.UnreliableSequenced, playerSyncChannel)
 	}
-	w.Uint8(packetVehicleSync)
-	w.Uint16(vehicleID)
-	w.Uint16(0)
-	w.Uint16(0)
-	w.Uint16(protocolVehicleKeys(mask))
-	// Keep the vehicle quaternion identical to Android raksamp's stubbed
-	// SetFromMatrix path, which leaves the zero-initialized value unchanged.
-	for range 4 {
-		w.Float32(0)
+	vehicle, vehicleKnown := c.vehicles[vehicleID]
+	if vehicleSeat == 0 {
+		vehicleSeat = 1
 	}
-	for _, value := range position {
-		w.Float32(value)
+	if pendingEntry {
+		// A pending entry has not received the server's seat/transform RPC
+		// yet. The streamed vehicle is the closest equivalent to the local
+		// game's vehicle transform used by the normal client.
+		if vehicleKnown {
+			position = [3]float32{vehicle.X, vehicle.Y, vehicle.Z}
+			vehicleQuaternion = yawQuaternion(vehicle.Angle)
+		}
 	}
-	for range 3 {
-		w.Float32(0)
+	vehicleHealth := c.vehicleHealth
+	if vehicleHealth == 0 {
+		vehicleHealth = vehicle.Health
+		if vehicleHealth == 0 {
+			vehicleHealth = 1000
+		}
 	}
-	w.Float32(1000)
-	w.Uint8(defaultPlayerHealth)
-	w.Uint8(0)
-	w.Uint8(protocolAdditionalKey(mask) << 6)
-	w.Uint8(0)
-	w.Uint8(0)
-	w.Uint16(^uint16(0))
-	w.Float32(0)
-	return c.conn.WriteChannel(ctx, w.Bytes(), raknet.UnreliableSequenced, 0)
+	vehicleFrame := vehicleFrame{
+		vehicleID: vehicleID, lrAnalog: c.vehicleLRAnalog, udAnalog: c.vehicleUDAnalog,
+		keys: c.vehicleProtocolKeys | protocolVehicleKeys(mask), quaternion: vehicleQuaternion,
+		position: position, velocity: c.vehicleVelocity, vehicleHealth: vehicleHealth,
+		playerHealth: defaultPlayerHealth, landingGear: 1,
+	}
+	passengerFrame := passengerFrame{
+		vehicleID: vehicleID, seatID: vehicleSeat, playerHealth: defaultPlayerHealth,
+		additionalKey: protocolAdditionalKey(mask), weapon: c.onFootWeapon,
+		lrAnalog: c.vehicleLRAnalog, udAnalog: c.vehicleUDAnalog,
+		keys: c.vehicleProtocolKeys | protocolVehicleKeys(mask), position: position,
+	}
+	c.stateMu.RUnlock()
+	if passenger {
+		return c.conn.WriteChannel(ctx, encodePassengerFrame(passengerFrame), raknet.UnreliableSequenced, playerSyncChannel)
+	}
+	return c.conn.WriteChannel(ctx, encodeVehicleFrame(vehicleFrame, protocolAdditionalKey(mask)), raknet.UnreliableSequenced, 0)
 }
 func encodeOnFoot(position [3]float32, mask uint32) []byte {
+	return encodeOnFootFrame(onFootFrame{position: position, keys: protocolKeys(mask), health: defaultPlayerHealth, weapon: protocolAdditionalKey(mask) << 6})
+}
+
+func encodeOnFootFrame(frame onFootFrame) []byte {
 	w := raknet.Writer{}
 	w.Uint8(packetPlayerSync)
-	w.Uint16(0)
-	w.Uint16(0)
-	w.Uint16(protocolKeys(mask))
-	for _, value := range position {
+	w.Uint16(frame.lrAnalog)
+	w.Uint16(frame.udAnalog)
+	w.Uint16(frame.keys)
+	for _, value := range frame.position {
 		w.Float32(value)
 	}
-	// Android raksamp currently has a stubbed SetFromMatrix(), so its
-	// zero-initialized on-foot quaternion remains four zero floats.
-	for range 4 {
-		w.Float32(0)
+	for _, value := range frame.quaternion {
+		w.Float32(value)
 	}
-	w.Uint8(defaultPlayerHealth)
-	w.Uint8(0)
-	w.Uint8(protocolAdditionalKey(mask) << 6)
-	w.Uint8(0)
-	for range 6 {
-		w.Float32(0)
+	w.Uint8(frame.health)
+	w.Uint8(frame.armour)
+	w.Uint8(frame.weapon)
+	w.Uint8(frame.specialAction)
+	for _, value := range frame.velocity {
+		w.Float32(value)
 	}
-	w.Uint16(0)
-	w.Uint32(0)
+	for _, value := range frame.surfingOffsets {
+		w.Float32(value)
+	}
+	w.Uint16(frame.surfingVehicleID)
+	w.Uint16(uint16(frame.animationID))
+	w.Uint16(uint16(frame.animationFlags))
 	return w.Bytes()
 }
+
+func encodeVehicleFrame(frame vehicleFrame, additionalKey uint8) []byte {
+	w := raknet.Writer{}
+	w.Uint8(packetVehicleSync)
+	w.Uint16(frame.vehicleID)
+	w.Uint16(frame.lrAnalog)
+	w.Uint16(frame.udAnalog)
+	w.Uint16(frame.keys)
+	for _, value := range frame.quaternion {
+		w.Float32(value)
+	}
+	for _, value := range frame.position {
+		w.Float32(value)
+	}
+	for _, value := range frame.velocity {
+		w.Float32(value)
+	}
+	w.Float32(frame.vehicleHealth)
+	w.Uint8(frame.playerHealth)
+	w.Uint8(frame.playerArmour)
+	w.Uint8((frame.weapon & 0x3f) | (additionalKey&0x03)<<6)
+	w.Uint8(frame.siren)
+	w.Uint8(frame.landingGear)
+	w.Uint16(frame.trailerID)
+	w.Float32(frame.trainSpeed)
+	return w.Bytes()
+}
+
+func encodePassengerFrame(frame passengerFrame) []byte {
+	w := raknet.Writer{}
+	w.Uint8(packetPassengerSync)
+	w.Uint16(frame.vehicleID)
+	writeBitField(&w, frame.driveBy, 2)
+	writeBitField(&w, frame.seatID, 6)
+	writeBitField(&w, frame.additionalKey, 2)
+	writeBitField(&w, frame.weapon, 6)
+	w.Uint8(frame.playerHealth)
+	w.Uint8(frame.playerArmour)
+	w.Uint16(frame.lrAnalog)
+	w.Uint16(frame.udAnalog)
+	w.Uint16(frame.keys)
+	for _, value := range frame.position {
+		w.Float32(value)
+	}
+	return w.Bytes()
+}
+
+func writeBitField(w *raknet.Writer, value uint8, bits int) {
+	w.Bits([]byte{value}, bits, true)
+}
+
 func protocolKeys(mask uint32) uint16 {
 	var keys uint16
 	if mask&(1<<2) != 0 {
@@ -616,6 +815,7 @@ func (c *Client) run() {
 	for {
 		packet, e := c.conn.Read(c.ctx)
 		if e != nil {
+			c.StopMovement()
 			c.emit(Event{Type: EventDisconnected, Data: e})
 			return
 		}
@@ -638,6 +838,7 @@ func (c *Client) run() {
 		}
 		if packet[0] == packetVehicleSync {
 			if player, vehicle, decodeErr := decodeVehicleSync(packet); decodeErr == nil {
+				c.observeVehicleSync(vehicle)
 				c.emit(Event{Type: EventPlayerSync, Data: player})
 				c.emit(Event{Type: EventVehicleSync, Data: vehicle})
 			} else {
@@ -660,6 +861,20 @@ func (c *Client) run() {
 		}
 	}
 }
+
+func (c *Client) observeVehicleSync(vehicle VehicleEvent) {
+	c.stateMu.Lock()
+	if c.vehicles == nil {
+		c.vehicles = make(map[uint16]VehicleEvent)
+	}
+	if previous, ok := c.vehicles[vehicle.ID]; ok {
+		vehicle.ModelID = previous.ModelID
+		vehicle.Angle = previous.Angle
+	}
+	c.vehicles[vehicle.ID] = vehicle
+	c.stateMu.Unlock()
+}
+
 func decodePlayerSync(packet []byte) (PlayerEvent, error) {
 	r := raknet.NewReader(packet)
 	if _, err := r.Uint8(); err != nil {
@@ -795,6 +1010,7 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 	r := raknet.NewReaderBits(rpc.Payload, rpc.PayloadBits)
 	switch rpc.ID {
 	case RPCInitGame:
+		c.StopMovement()
 		c.setSpawned(false)
 		localPlayerID, e := decodeInitGameLocalPlayerID(r)
 		if e != nil {
@@ -872,6 +1088,7 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 		return nil, nil
 	case RPCSetPlayerPos, RPCSetPlayerPosFindZ:
 		c.observeServerInitialization()
+		c.StopMovement()
 		position, e := readPosition(r)
 		if e != nil {
 			return nil, e
@@ -892,7 +1109,7 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 			return nil, e
 		}
 		passenger := seatID != 0
-		c.setVehicleState(vehicleID, passenger)
+		c.setVehicleState(vehicleID, seatID)
 		return &Event{Type: EventVehicleState, Data: VehicleStateEvent{InVehicle: true, Passenger: passenger, VehicleID: vehicleID}}, nil
 	case RPCRemoveFromVehicle:
 		c.clearVehicleState()
@@ -1081,12 +1298,21 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 		if e != nil {
 			return nil, e
 		}
+		c.stateMu.Lock()
+		if c.vehicles == nil {
+			c.vehicles = make(map[uint16]VehicleEvent)
+		}
+		c.vehicles[v.ID] = v
+		c.stateMu.Unlock()
 		return &Event{Type: EventVehicleAdd, Data: v}, nil
 	case RPCWorldVehicleRemove:
 		id, e := r.Uint16()
 		if e != nil {
 			return nil, e
 		}
+		c.stateMu.Lock()
+		delete(c.vehicles, id)
+		c.stateMu.Unlock()
 		return &Event{Type: EventVehicleRemove, Data: VehicleEvent{ID: id}}, nil
 	}
 	return nil, nil
@@ -1202,19 +1428,57 @@ func (c *Client) setOnFootPosition(position [3]float32) {
 	c.inVehicle = false
 	c.passenger = false
 	c.vehicleID = 0
+	c.vehicleSeat = 0
+	c.enterPending = false
+	c.exitPending = false
+	c.enterQueued = false
+	c.clearMotionFrameLocked()
 	c.stateMu.Unlock()
 }
 
-func (c *Client) setVehicleState(vehicleID uint16, passenger bool) {
+func (c *Client) setVehicleState(vehicleID uint16, seatID uint8) {
 	c.stateMu.Lock()
-	c.vehicleID, c.inVehicle, c.passenger = vehicleID, true, passenger
+	c.vehicleID, c.inVehicle, c.passenger, c.vehicleSeat = vehicleID, true, seatID != 0, seatID
+	c.enterPending = false
+	c.exitPending = false
+	c.enterQueued = false
+	c.vehicleHealth = 0
+	c.vehicleQuaternion = [4]float32{}
+	if vehicle, ok := c.vehicles[vehicleID]; ok {
+		// PutPlayerInVehicle does not carry a position. The normal game client
+		// obtains it from the streamed vehicle before producing its first
+		// in-car sync, so use the same authoritative vehicle transform here.
+		c.position = [3]float32{vehicle.X, vehicle.Y, vehicle.Z}
+		c.vehicleHealth = vehicle.Health
+		c.vehicleQuaternion = yawQuaternion(vehicle.Angle)
+	}
 	c.stateMu.Unlock()
 }
 
 func (c *Client) clearVehicleState() {
+	var queuedVehicle uint16
+	var queuedPassenger bool
+	var shouldEnter bool
 	c.stateMu.Lock()
-	c.vehicleID, c.inVehicle, c.passenger = 0, false, false
+	c.vehicleID, c.inVehicle, c.passenger, c.vehicleSeat = 0, false, false, 0
+	c.enterPending = false
+	c.exitPending = false
+	c.vehicleVelocity = [3]float32{}
+	c.vehicleQuaternion = [4]float32{}
+	c.vehicleLRAnalog, c.vehicleUDAnalog, c.vehicleProtocolKeys = 0, 0, 0
+	c.vehicleHealth = 0
+	if c.enterQueued {
+		queuedVehicle = c.enterQueuedVehicle
+		queuedPassenger = c.enterQueuedPassenger
+		shouldEnter = true
+		c.enterQueued = false
+	}
 	c.stateMu.Unlock()
+	if shouldEnter && c.ctx != nil {
+		if err := c.EnterVehicle(c.ctx, queuedVehicle, queuedPassenger); err != nil {
+			c.emit(Event{Type: EventProtocolError, Data: err.Error()})
+		}
+	}
 }
 
 func (c *Client) setSpawnInfo(info SpawnInfo) {
@@ -1364,7 +1628,7 @@ func decodeVehicle(r *raknet.Reader) (VehicleEvent, error) {
 	if v.Z, e = r.Float32(); e != nil {
 		return v, e
 	}
-	if _, e = r.Float32(); e != nil {
+	if v.Angle, e = r.Float32(); e != nil {
 		return v, e
 	}
 	if _, e = r.Bits(2*8, true); e != nil {

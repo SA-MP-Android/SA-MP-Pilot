@@ -16,17 +16,18 @@ func TestConnectionHandshakeAndReliableExchange(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer server.Close()
-	serverErr := make(chan error, 1)
+	serverReady := make(chan error, 1)
+	serverClosed := make(chan error, 1)
 	go func() {
 		buffer := make([]byte, maxDatagramSize)
 		n, client, e := server.ReadFromUDP(buffer)
 		if e != nil {
-			serverErr <- e
+			serverReady <- e
 			return
 		}
 		packet := decodeTestDatagram(buffer[:n], uint16(server.LocalAddr().(*net.UDPAddr).Port))
 		if len(packet) != offlinePacketSize || packet[0] != packetOpenConnectionRequest {
-			serverErr <- ErrHandshake
+			serverReady <- ErrHandshake
 			return
 		}
 		cookie := []byte{packetOpenConnectionCookie, 0, 0}
@@ -34,24 +35,24 @@ func TestConnectionHandshakeAndReliableExchange(t *testing.T) {
 		_, _ = server.WriteToUDP(cookie, client)
 		n, client, e = server.ReadFromUDP(buffer)
 		if e != nil {
-			serverErr <- e
+			serverReady <- e
 			return
 		}
 		packet = decodeTestDatagram(buffer[:n], uint16(server.LocalAddr().(*net.UDPAddr).Port))
 		if len(packet) != offlinePacketSize || binary.LittleEndian.Uint16(packet[1:]) != testCookie^connectionCookieXOR {
-			serverErr <- ErrHandshake
+			serverReady <- ErrHandshake
 			return
 		}
 		_, _ = server.WriteToUDP([]byte{packetOpenConnectionReply, 0}, client)
 		n, client, e = server.ReadFromUDP(buffer)
 		if e != nil {
-			serverErr <- e
+			serverReady <- e
 			return
 		}
 		packet = decodeTestDatagram(buffer[:n], uint16(server.LocalAddr().(*net.UDPAddr).Port))
 		_, frames, e := DecodeDatagram(packet)
 		if e != nil || len(frames) != 1 || string(frames[0].Payload) != string([]byte{packetConnectionRequest})+"secret" {
-			serverErr <- ErrHandshake
+			serverReady <- ErrHandshake
 			return
 		}
 		accepted := Frame{MessageNumber: 0, Reliability: Reliable, Payload: []byte{PacketConnectionAccepted}, PayloadBits: 8}
@@ -59,7 +60,44 @@ func TestConnectionHandshakeAndReliableExchange(t *testing.T) {
 		if e == nil {
 			_, e = server.WriteToUDP(response, client)
 		}
-		serverErr <- e
+		serverReady <- e
+		if e != nil {
+			return
+		}
+		_ = server.SetReadDeadline(time.Now().Add(2 * time.Second))
+		const serverDrainMessage uint16 = 7
+		for {
+			n, _, e = server.ReadFromUDP(buffer)
+			if e != nil {
+				serverClosed <- e
+				return
+			}
+			packet = decodeTestDatagram(buffer[:n], uint16(server.LocalAddr().(*net.UDPAddr).Port))
+			acks, frames, decodeErr := DecodeDatagram(packet)
+			if decodeErr != nil {
+				continue
+			}
+			for _, ack := range acks {
+				if ack.Min <= serverDrainMessage && serverDrainMessage <= ack.Max {
+					serverClosed <- nil
+					return
+				}
+			}
+			for _, frame := range frames {
+				if len(frame.Payload) == 1 && frame.Payload[0] == packetDisconnection {
+					drainFrame := Frame{
+						MessageNumber: serverDrainMessage,
+						Reliability:   Reliable,
+						Payload:       []byte{packetInternalPing, 0, 0, 0, 0},
+						PayloadBits:   40,
+					}
+					response, encodeErr := EncodeDatagram([]Range{{frame.MessageNumber, frame.MessageNumber}}, []Frame{drainFrame})
+					if encodeErr == nil {
+						_, _ = server.WriteToUDP(response, client)
+					}
+				}
+			}
+		}
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -67,9 +105,14 @@ func TestConnectionHandshakeAndReliableExchange(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	defer conn.Close()
-	if e = <-serverErr; e != nil {
+	if e = <-serverReady; e != nil {
 		t.Fatal(e)
+	}
+	if e = conn.Close(); e != nil {
+		t.Fatal(e)
+	}
+	if e = <-serverClosed; e != nil {
+		t.Fatalf("server did not receive graceful disconnect: %v", e)
 	}
 }
 func decodeTestDatagram(encoded []byte, port uint16) []byte {
