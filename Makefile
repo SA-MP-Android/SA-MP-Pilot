@@ -8,6 +8,7 @@ build:
 	go build -tags release -o bin/sa-mp-pilot ./cmd/sa-mp-pilot
 test:
 	go test ./...
+	node --test examples/plugins/auto-spawn/sdk.test.mjs
 	pnpm --dir web test
 lint:
 	go vet ./...

@@ -1,6 +1,6 @@
-import { EVENT_APPEARANCE, EVENT_CHAT, log, on, start } from './sdk.mjs'
+import { EVENT_CLIENT_APPEARANCE, EVENT_CLIENT_CHAT, log, on, start } from './sdk.mjs'
 
-on(EVENT_APPEARANCE, async (event, instance) => {
+on(EVENT_CLIENT_APPEARANCE, async (event, instance) => {
   const snapshot = await instance.getSnapshot()
   if (snapshot.spawnReady && !snapshot.spawned) {
     await instance.requestSpawn()
@@ -8,7 +8,7 @@ on(EVENT_APPEARANCE, async (event, instance) => {
   }
 })
 
-on(EVENT_CHAT, (event) => {
+on(EVENT_CLIENT_CHAT, (event) => {
   log('info', `[${event.instanceId}] ${event.data.text ?? ''}`)
 })
 

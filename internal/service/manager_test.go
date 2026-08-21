@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/domain"
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/raknet"
+	"github.com/SA-MP-Android/SA-MP-Pilot/internal/samp"
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/store"
 	"github.com/SA-MP-Android/SA-MP-Pilot/plugin"
 	"os"
@@ -180,6 +181,84 @@ func TestPluginEventsArePublishedToDedicatedSubscribers(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("plugin event was not published")
+	}
+}
+
+func TestPluginClientEventsUseStableCamelCasePayloads(t *testing.T) {
+	playerID := uint16(23)
+	data := pluginEventData(samp.Event{Type: samp.EventChat, Data: samp.ChatEvent{PlayerID: &playerID, Text: "hello", Color: 0x11223344}})
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(encoded), `{"playerId":23,"text":"hello","color":"#11223344"}`; got != want {
+		t.Fatalf("chat plugin payload = %s, want %s", got, want)
+	}
+
+	dialog := pluginEventData(samp.Event{Type: samp.EventDialog, Data: samp.DialogEvent{ID: 7, Style: 2, Title: "Title", RawMessage: []byte("private")}})
+	encoded, err = json.Marshal(dialog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "RawMessage") || strings.Contains(string(encoded), "private") {
+		t.Fatalf("dialog payload leaked decoder internals: %s", encoded)
+	}
+}
+
+func TestPluginAPIManagesInstancesAndCommands(t *testing.T) {
+	m := newManager(t)
+	createdValue, err := m.InvokePluginAPI(context.Background(), "", plugin.MethodCreateInstance, json.RawMessage(`{"host":"127.0.0.1","port":7777,"nickname":"plugin"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := createdValue.(domain.Snapshot)
+	if created.Server.ID == "" {
+		t.Fatal("plugin-created instance has no id")
+	}
+
+	if _, err := m.InvokePluginAPI(context.Background(), created.Server.ID, plugin.MethodUpdateInstance, json.RawMessage(`{"host":"127.0.0.1","port":7778,"nickname":"updated"}`)); err != nil {
+		t.Fatal(err)
+	}
+	commandValue, err := m.InvokePluginAPI(context.Background(), created.Server.ID, plugin.MethodAddCommand, json.RawMessage(`{"label":"Help","command":"/help"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := commandValue.(domain.QuickCommand)
+	if _, err := m.InvokePluginAPI(context.Background(), created.Server.ID, plugin.MethodDeleteCommand, json.RawMessage(fmt.Sprintf(`{"commandId":%q}`, command.ID))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.InvokePluginAPI(context.Background(), created.Server.ID, plugin.MethodDeleteInstance, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPluginAPIRejectsInvalidParameterTypes(t *testing.T) {
+	if _, err := requiredInteger(map[string]any{"mask": "not-a-number"}, "mask", 0, 10); err == nil {
+		t.Fatal("invalid integer parameter unexpectedly succeeded")
+	}
+	if _, err := requiredFloat(map[string]any{"x": "not-a-number"}, "x"); err == nil {
+		t.Fatal("invalid float parameter unexpectedly succeeded")
+	}
+	if _, err := requiredString(map[string]any{"text": " "}, "text"); err == nil {
+		t.Fatal("blank string parameter unexpectedly succeeded")
+	}
+	if _, err := requiredInteger(map[string]any{"before": float64(1 << 53)}, "before", 0, maxPluginSafeInteger); err == nil {
+		t.Fatal("integer beyond JavaScript's safe range unexpectedly succeeded")
+	}
+	if _, err := requiredInteger(map[string]any{"before": float64(^uint64(0) >> 1)}, "before", 0, int64(^uint64(0)>>1)); err == nil {
+		t.Fatal("int64 boundary value unexpectedly succeeded")
+	}
+}
+
+func TestActionContextHonorsParentCancellation(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	cancelParent()
+	ctx, cancel := actionContext(parent)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("action context did not inherit parent cancellation")
 	}
 }
 

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -30,21 +31,22 @@ import (
 var statePublishInterval = 500 * time.Millisecond
 
 const (
-	actionTimeout             = 5 * time.Second
-	reconnectDelay            = 2 * time.Second
-	defaultChatColor          = "#ffffffff"
-	errorChatColor            = "#ff6b6bff"
-	dialogStyleList           = 2
-	dialogStyleTabList        = 4
-	dialogStyleTabListHeaders = 5
-	maxSubscribers            = 16
-	stateEventQueueSize       = 2
-	chatEventQueueSize        = 64
-	maxHostBytes              = 253
-	maxNicknameBytes          = 96
-	maxPasswordBytes          = 128
-	maxCommandLabelBytes      = 128
-	maxCommandTextBytes       = 1024
+	actionTimeout                   = 5 * time.Second
+	maxPluginSafeInteger      int64 = 1<<53 - 1
+	reconnectDelay                  = 2 * time.Second
+	defaultChatColor                = "#ffffffff"
+	errorChatColor                  = "#ff6b6bff"
+	dialogStyleList                 = 2
+	dialogStyleTabList              = 4
+	dialogStyleTabListHeaders       = 5
+	maxSubscribers                  = 16
+	stateEventQueueSize             = 2
+	chatEventQueueSize              = 64
+	maxHostBytes                    = 253
+	maxNicknameBytes                = 96
+	maxPasswordBytes                = 128
+	maxCommandLabelBytes            = 128
+	maxCommandTextBytes             = 1024
 )
 
 type instance struct {
@@ -418,7 +420,8 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 	info, _ := samp.Query(ctx, s.Host, s.Port)
 	var disconnectErr error
 	for event := range client.Events() {
-		m.emitClientPluginEvent(id, event)
+		// Apply the event to the in-memory snapshot before notifying plugins.
+		// Handlers may immediately read the snapshot or respond to a dialog.
 		i.mu.Lock()
 		publishSnapshot := true
 		switch event.Type {
@@ -597,6 +600,7 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 		if publishSnapshot {
 			m.publish(id, i)
 		}
+		m.emitClientPluginEvent(id, event)
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -853,7 +857,21 @@ func (m *Manager) Disconnect(id string) error {
 	m.publish(id, i)
 	return nil
 }
+func actionContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(parent, actionTimeout)
+}
+
 func (m *Manager) Action(id, action string, p map[string]any) error {
+	return m.action(context.Background(), id, action, p)
+}
+
+func (m *Manager) action(ctx context.Context, id, action string, p map[string]any) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	i, ok := m.find(id)
 	if !ok {
 		return errors.New("instance not found")
@@ -866,74 +884,111 @@ func (m *Manager) Action(id, action string, p map[string]any) error {
 	}
 	switch action {
 	case domain.ActionChat:
-		t, _ := p["text"].(string)
-		if t == "" {
+		t, err := requiredString(p, "text")
+		if err != nil {
 			i.mu.Unlock()
-			return errors.New("text is required")
+			return err
 		}
 		i.mu.Unlock()
-		var err error
+		var sendErr error
+		requestCtx, cancel := actionContext(ctx)
+		defer cancel()
 		if strings.HasPrefix(t, "/") {
-			err = client.SendCommand(context.Background(), t)
+			sendErr = client.SendCommand(requestCtx, t)
 		} else {
-			err = client.SendChat(context.Background(), t)
+			sendErr = client.SendChat(requestCtx, t)
 		}
-		if err != nil {
-			return err
+		if sendErr != nil {
+			return sendErr
 		}
 		return nil
 	case domain.ActionSpawn:
 		i.mu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
-		err := client.RequestSpawn(ctx)
+		requestCtx, cancel := actionContext(ctx)
+		err := client.RequestSpawn(requestCtx)
 		cancel()
 		return err
 	case domain.ActionKeys:
-		mask := uint32(number(p["mask"]))
-		i.mu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
-		err := client.SetKeys(ctx, mask)
-		cancel()
+		value, err := requiredInteger(p, "mask", 0, int64(^uint32(0)))
 		if err != nil {
+			i.mu.Unlock()
 			return err
+		}
+		mask := uint32(value)
+		i.mu.Unlock()
+		requestCtx, cancel := actionContext(ctx)
+		actionErr := client.SetKeys(requestCtx, mask)
+		cancel()
+		if actionErr != nil {
+			return actionErr
 		}
 		i.mu.Lock()
 		i.snap.KeyMask = 0
 	case domain.ActionAFK:
-		enabled, _ := p["enabled"].(bool)
+		enabled, ok := p["enabled"].(bool)
+		if !ok {
+			i.mu.Unlock()
+			return errors.New("enabled must be a boolean")
+		}
 		client.SetAFK(enabled)
 		i.snap.AFK = enabled
 		if i.snap.AFK {
 			i.snap.KeyMask = 0
 		}
 	case domain.ActionTeleport:
-		x, y, z := float32(number(p["x"])), float32(number(p["y"])), float32(number(p["z"]))
+		xValue, err := requiredFloat(p, "x")
+		yValue, errY := requiredFloat(p, "y")
+		zValue, errZ := requiredFloat(p, "z")
+		if err != nil || errY != nil || errZ != nil {
+			i.mu.Unlock()
+			if err != nil {
+				return err
+			}
+			if errY != nil {
+				return errY
+			}
+			return errZ
+		}
+		x, y, z := float32(xValue), float32(yValue), float32(zValue)
 		i.mu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
-		err := client.Teleport(ctx, x, y, z)
+		requestCtx, cancel := actionContext(ctx)
+		actionErr := client.Teleport(requestCtx, x, y, z)
 		cancel()
-		if err != nil {
-			return err
+		if actionErr != nil {
+			return actionErr
 		}
 		i.mu.Lock()
 		i.position = [3]float32{x, y, z}
 		recalculateNearby(i)
 	case domain.ActionEnterVehicle:
-		vehicleID := uint16(number(p["vehicleId"]))
-		passenger, _ := p["passenger"].(bool)
-		i.mu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
-		err := client.EnterVehicle(ctx, vehicleID, passenger)
-		cancel()
+		value, err := requiredInteger(p, "vehicleId", 0, int64(^uint16(0)))
 		if err != nil {
+			i.mu.Unlock()
 			return err
+		}
+		vehicleID := uint16(value)
+		passenger, _ := p["passenger"].(bool)
+		if rawPassenger, exists := p["passenger"]; exists {
+			var ok bool
+			passenger, ok = rawPassenger.(bool)
+			if !ok {
+				i.mu.Unlock()
+				return errors.New("passenger must be a boolean")
+			}
+		}
+		i.mu.Unlock()
+		requestCtx, cancel := actionContext(ctx)
+		actionErr := client.EnterVehicle(requestCtx, vehicleID, passenger)
+		cancel()
+		if actionErr != nil {
+			return actionErr
 		}
 		i.mu.Lock()
 		i.snap.VehicleState = domain.VehicleState{InVehicle: true, VehicleID: int(vehicleID), Passenger: passenger}
 	case domain.ActionExitVehicle:
 		i.mu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
-		err := client.ExitVehicle(ctx)
+		requestCtx, cancel := actionContext(ctx)
+		err := client.ExitVehicle(requestCtx)
 		cancel()
 		if err != nil {
 			return err
@@ -941,41 +996,68 @@ func (m *Manager) Action(id, action string, p map[string]any) error {
 		i.mu.Lock()
 		i.snap.VehicleState = domain.VehicleState{VehicleID: domain.InvalidVehicleID}
 	case domain.ActionDialog:
-		dialogID := int16(number(p["dialogId"]))
-		button := uint8(number(p["buttonId"]))
-		item := int16(number(p["listItem"]))
-		input, _ := p["inputText"].(string)
+		dialogValue, err := requiredInteger(p, "dialogId", -1<<15, 1<<15-1)
+		buttonValue, errButton := requiredInteger(p, "buttonId", 0, int64(^uint8(0)))
+		itemValue, errItem := optionalInteger(p, "listItem", 0, -1<<15, 1<<15-1)
+		if err != nil || errButton != nil || errItem != nil {
+			i.mu.Unlock()
+			if err != nil {
+				return err
+			}
+			if errButton != nil {
+				return errButton
+			}
+			return errItem
+		}
+		dialogID, button, item := int16(dialogValue), uint8(buttonValue), int16(itemValue)
+		input, ok := p["inputText"].(string)
+		if _, exists := p["inputText"]; exists && !ok {
+			i.mu.Unlock()
+			return errors.New("inputText must be a string")
+		}
 		activeDialog := i.snap.ActiveDialog
 		i.mu.Unlock()
-		var err error
+		var dialogErr error
+		requestCtx, cancel := actionContext(ctx)
+		defer cancel()
 		if rawInput, ok := rawDialogListInput(activeDialog, item); ok {
-			err = client.RespondDialogBytes(context.Background(), dialogID, button, item, rawInput)
+			dialogErr = client.RespondDialogBytes(requestCtx, dialogID, button, item, rawInput)
 		} else {
-			err = client.RespondDialog(context.Background(), dialogID, button, item, input)
+			dialogErr = client.RespondDialog(requestCtx, dialogID, button, item, input)
 		}
-		if err != nil {
-			return err
+		if dialogErr != nil {
+			return dialogErr
 		}
 		i.mu.Lock()
 		i.snap.ActiveDialog = nil
 	case domain.ActionClickPlayer:
-		playerID := uint16(number(p["playerId"]))
-		i.mu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
-		err := client.ClickPlayer(ctx, playerID)
-		cancel()
+		value, err := requiredInteger(p, "playerId", 0, int64(^uint16(0)))
 		if err != nil {
+			i.mu.Unlock()
 			return err
+		}
+		playerID := uint16(value)
+		i.mu.Unlock()
+		requestCtx, cancel := actionContext(ctx)
+		actionErr := client.ClickPlayer(requestCtx, playerID)
+		cancel()
+		if actionErr != nil {
+			return actionErr
 		}
 		i.mu.Lock()
 	case domain.ActionTextDraw:
-		textDrawID := uint16(number(p["textDrawId"]))
-		i.mu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
-		err := client.ClickTextDraw(ctx, textDrawID)
-		cancel()
+		value, err := requiredInteger(p, "textDrawId", 0, int64(^uint16(0)))
 		if err != nil {
+			i.mu.Unlock()
 			return err
+		}
+		textDrawID := uint16(value)
+		i.mu.Unlock()
+		requestCtx, cancel := actionContext(ctx)
+		actionErr := client.ClickTextDraw(requestCtx, textDrawID)
+		cancel()
+		if actionErr != nil {
+			return actionErr
 		}
 		i.mu.Lock()
 	case domain.ActionDeferDialog:
@@ -990,7 +1072,12 @@ func (m *Manager) Action(id, action string, p map[string]any) error {
 			i.snap.ActiveDialog = nil
 		}
 	case domain.ActionShowDialog:
-		dialogID := int(number(p["dialogId"]))
+		value, err := requiredInteger(p, "dialogId", -1<<31, 1<<31-1)
+		if err != nil {
+			i.mu.Unlock()
+			return err
+		}
+		dialogID := int(value)
 		for index, dialog := range i.snap.Dialogs {
 			if dialog.ID == dialogID {
 				i.snap.ActiveDialog = &dialog
@@ -1001,7 +1088,12 @@ func (m *Manager) Action(id, action string, p map[string]any) error {
 			}
 		}
 	case domain.ActionDismissDialog:
-		dialogID := int(number(p["dialogId"]))
+		value, err := requiredInteger(p, "dialogId", -1<<31, 1<<31-1)
+		if err != nil {
+			i.mu.Unlock()
+			return err
+		}
+		dialogID := int(value)
 		dialogs := i.snap.Dialogs[:0]
 		for _, dialog := range i.snap.Dialogs {
 			if dialog.ID != dialogID {
@@ -1031,6 +1123,9 @@ func (m *Manager) RefreshScores(ctx context.Context, id string) error {
 	if client == nil || !connected {
 		return errors.New("instance is not connected")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	requestCtx, cancel := context.WithTimeout(ctx, actionTimeout)
 	defer cancel()
 	return client.RefreshScores(requestCtx)
@@ -1047,9 +1142,32 @@ func (m *Manager) InvokePluginAPI(ctx context.Context, instanceID, method string
 	switch method {
 	case plugin.MethodListInstances:
 		return m.List(), nil
-	case plugin.MethodGetInstanceOld, plugin.MethodGetInstance:
+	case plugin.MethodCreateInstance:
+		var server domain.Server
+		if err := decodePluginObject(params, &server); err != nil {
+			return nil, err
+		}
+		return m.Create(server)
+	case plugin.MethodUpdateInstance:
+		if instanceID == "" {
+			return nil, errors.New("instanceId is required")
+		}
+		var server domain.Server
+		if err := decodePluginObject(params, &server); err != nil {
+			return nil, err
+		}
+		return m.Update(instanceID, server)
+	case plugin.MethodDeleteInstance:
+		if instanceID == "" {
+			return nil, errors.New("instanceId is required")
+		}
+		return nil, m.Delete(instanceID)
+	case plugin.MethodGetInstance:
 		if instanceID == "" {
 			instanceID, _ = params["instanceId"].(string)
+		}
+		if instanceID == "" {
+			return nil, errors.New("instanceId is required")
 		}
 		snapshot, ok := m.Get(instanceID)
 		if !ok {
@@ -1057,35 +1175,78 @@ func (m *Manager) InvokePluginAPI(ctx context.Context, instanceID, method string
 		}
 		return snapshot, nil
 	case plugin.MethodGetChat:
-		before := int64(number(params["before"]))
-		limit := int(number(params["limit"]))
-		return m.Chat(instanceID, before, limit)
+		before, err := optionalInteger(params, "before", 0, 0, maxPluginSafeInteger)
+		if err != nil {
+			return nil, err
+		}
+		limit, err := optionalInteger(params, "limit", 0, 0, 100)
+		if err != nil {
+			return nil, err
+		}
+		return m.Chat(instanceID, before, int(limit))
 	case plugin.MethodConnect:
+		if instanceID == "" {
+			return nil, errors.New("instanceId is required")
+		}
 		return nil, m.Connect(instanceID)
 	case plugin.MethodDisconnect:
+		if instanceID == "" {
+			return nil, errors.New("instanceId is required")
+		}
 		return nil, m.Disconnect(instanceID)
+	case plugin.MethodAddCommand:
+		if instanceID == "" {
+			return nil, errors.New("instanceId is required")
+		}
+		var command domain.QuickCommand
+		if err := decodePluginObject(params, &command); err != nil {
+			return nil, err
+		}
+		return m.AddCommand(instanceID, command)
+	case plugin.MethodDeleteCommand:
+		if instanceID == "" {
+			return nil, errors.New("instanceId is required")
+		}
+		commandID, err := requiredString(params, "commandId")
+		if err != nil {
+			return nil, err
+		}
+		return nil, m.DeleteCommand(instanceID, commandID)
 	case plugin.MethodAction:
 		action, _ := params["action"].(string)
-		actionParams, _ := params["params"].(map[string]any)
 		if action == "" {
 			return nil, errors.New("action is required")
 		}
-		return nil, m.Action(instanceID, action, actionParams)
+		actionParams := map[string]any{}
+		if rawActionParams, exists := params["params"]; exists {
+			var ok bool
+			actionParams, ok = rawActionParams.(map[string]any)
+			if !ok {
+				return nil, errors.New("params must be an object")
+			}
+		}
+		return nil, m.action(ctx, instanceID, action, actionParams)
 	case plugin.MethodSendChat:
-		text, _ := params["text"].(string)
-		return nil, m.Action(instanceID, domain.ActionChat, map[string]any{"text": text})
+		text, err := requiredString(params, "text")
+		if err != nil {
+			return nil, err
+		}
+		return nil, m.action(ctx, instanceID, domain.ActionChat, map[string]any{"text": text})
 	case plugin.MethodSendCommand:
-		command, _ := params["command"].(string)
+		command, err := requiredString(params, "command")
+		if err != nil {
+			return nil, err
+		}
 		if command != "" && !strings.HasPrefix(command, "/") {
 			command = "/" + command
 		}
-		return nil, m.Action(instanceID, domain.ActionChat, map[string]any{"text": command})
+		return nil, m.action(ctx, instanceID, domain.ActionChat, map[string]any{"text": command})
 	case plugin.MethodRequestSpawn:
-		return nil, m.Action(instanceID, domain.ActionSpawn, nil)
+		return nil, m.action(ctx, instanceID, domain.ActionSpawn, nil)
 	case plugin.MethodRefreshScores:
 		return nil, m.RefreshScores(ctx, instanceID)
 	case plugin.MethodSetKeys, plugin.MethodSetAFK, plugin.MethodTeleport, plugin.MethodEnterVehicle, plugin.MethodExitVehicle, plugin.MethodRespondDialog, plugin.MethodClickPlayer, plugin.MethodClickTextDraw:
-		return nil, m.Action(instanceID, pluginAction(method), params)
+		return nil, m.action(ctx, instanceID, pluginAction(method), params)
 	default:
 		return nil, fmt.Errorf("unknown plugin API method %q", method)
 	}
@@ -1103,6 +1264,50 @@ func pluginParams(raw json.RawMessage) (map[string]any, error) {
 		params = map[string]any{}
 	}
 	return params, nil
+}
+
+func decodePluginObject(params map[string]any, target any) error {
+	encoded, err := json.Marshal(params)
+	if err != nil {
+		return fmt.Errorf("encode plugin parameters: %w", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("invalid plugin parameters: %w", err)
+	}
+	return nil
+}
+
+func requiredString(params map[string]any, key string) (string, error) {
+	value, ok := params[key].(string)
+	if !ok || strings.TrimSpace(value) == "" {
+		return "", fmt.Errorf("%s is required", key)
+	}
+	return value, nil
+}
+
+func requiredFloat(params map[string]any, key string) (float64, error) {
+	value, ok := params[key].(float64)
+	if !ok || math.IsNaN(value) || math.IsInf(value, 0) || math.Abs(value) > math.MaxFloat32 {
+		return 0, fmt.Errorf("%s must be a finite number", key)
+	}
+	return value, nil
+}
+
+func requiredInteger(params map[string]any, key string, minimum, maximum int64) (int64, error) {
+	value, ok := params[key].(float64)
+	if !ok || math.IsNaN(value) || math.IsInf(value, 0) || math.Trunc(value) != value || math.Abs(value) > float64(maxPluginSafeInteger) || value < float64(minimum) || value > float64(maximum) {
+		return 0, fmt.Errorf("%s must be an integer between %d and %d", key, minimum, maximum)
+	}
+	return int64(value), nil
+}
+
+func optionalInteger(params map[string]any, key string, fallback, minimum, maximum int64) (int64, error) {
+	if _, exists := params[key]; !exists {
+		return fallback, nil
+	}
+	return requiredInteger(params, key, minimum, maximum)
 }
 
 func pluginAction(method string) string {
@@ -1128,7 +1333,6 @@ func pluginAction(method string) string {
 	}
 }
 
-func number(v any) float64 { n, _ := v.(float64); return n }
 func (m *Manager) find(id string) (*instance, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -1238,12 +1442,141 @@ func (m *Manager) emitClientPluginEvent(instanceID string, event samp.Event) {
 	if sink == nil {
 		return
 	}
-	data := event.Data
-	if err, ok := data.(error); ok {
-		data = map[string]string{"error": err.Error()}
-	}
+	data := pluginEventData(event)
 	sink.Emit(plugin.Event{Name: plugin.EventClientPrefix + string(event.Type), InstanceID: instanceID, Time: time.Now(), Data: data})
 }
+
+// pluginEventData is the compatibility boundary between the internal SA-MP
+// decoder and the public plugin protocol. Keep this mapping explicit: raw Go
+// structs intentionally do not cross the boundary because their exported
+// field names and implementation-only flags are not a stable JSON contract.
+func pluginEventData(event samp.Event) any {
+	switch event.Type {
+	case samp.EventJoined:
+		value := event.Data.(samp.PlayerEvent)
+		return plugin.JoinedEventData{PlayerID: int(value.ID)}
+	case samp.EventChat:
+		value := event.Data.(samp.ChatEvent)
+		data := plugin.ChatEventData{Text: value.Text}
+		if value.PlayerID != nil {
+			playerID := int(*value.PlayerID)
+			data.PlayerID = &playerID
+		}
+		if value.Color != 0 {
+			data.Color = colorHex(value.Color)
+		}
+		return data
+	case samp.EventPlayerJoin:
+		value := event.Data.(samp.PlayerEvent)
+		data := plugin.PlayerJoinEventData{ID: int(value.ID), Name: value.Name}
+		if value.HasColor {
+			data.Color = colorHex(value.Color)
+		}
+		return data
+	case samp.EventPlayerQuit:
+		value := event.Data.(samp.PlayerEvent)
+		return plugin.PlayerQuitEventData{ID: int(value.ID)}
+	case samp.EventScores:
+		values := event.Data.([]samp.PlayerEvent)
+		data := make([]plugin.ScoreEventData, 0, len(values))
+		for _, value := range values {
+			data = append(data, plugin.ScoreEventData{ID: int(value.ID), Score: int(value.Score), Ping: int(value.Ping)})
+		}
+		return data
+	case samp.EventDialog:
+		value := event.Data.(samp.DialogEvent)
+		return plugin.DialogEventData{ID: int(value.ID), Style: int(value.Style), Title: value.Title, Message: value.Message, Button1: value.Button1, Button2: value.Button2}
+	case samp.EventDisconnected:
+		return plugin.ReasonEventData{Reason: eventErrorText(event.Data)}
+	case samp.EventProtocolError:
+		return plugin.ErrorEventData{Message: eventErrorText(event.Data)}
+	case samp.EventTextDrawShow:
+		value := event.Data.(samp.TextDrawEvent)
+		return plugin.TextDrawEventData{
+			ID: int(value.ID), Text: value.Text, Style: int(value.Style), Flags: int(value.Flags), Shadow: int(value.Shadow), Outline: int(value.Outline),
+			Selectable: value.Selectable != 0, LetterColor: colorHex(value.LetterColor), BoxColor: colorHex(value.BoxColor), BackgroundColor: colorHex(value.BackgroundColor),
+			X: value.X, Y: value.Y, LetterWidth: value.LetterWidth, LetterHeight: value.LetterHeight, LineWidth: value.LineWidth, LineHeight: value.LineHeight, ModelID: int(value.ModelID),
+		}
+	case samp.EventTextDrawHide:
+		value := event.Data.(samp.TextDrawEvent)
+		return plugin.IDEventData{ID: int(value.ID)}
+	case samp.EventTextDrawText:
+		value := event.Data.(samp.TextDrawEvent)
+		return plugin.TextDrawTextEventData{ID: int(value.ID), Text: value.Text}
+	case samp.EventObjectAdd:
+		value := event.Data.(samp.ObjectEvent)
+		return plugin.ObjectEventData{ID: int(value.ID), ModelID: int(value.ModelID), X: value.X, Y: value.Y, Z: value.Z}
+	case samp.EventObjectRemove:
+		value := event.Data.(samp.ObjectEvent)
+		return plugin.IDEventData{ID: int(value.ID)}
+	case samp.EventVehicleAdd:
+		value := event.Data.(samp.VehicleEvent)
+		return plugin.VehicleEventData{ID: int(value.ID), ModelID: int(value.ModelID), X: value.X, Y: value.Y, Z: value.Z, Health: value.Health}
+	case samp.EventVehicleRemove:
+		value := event.Data.(samp.VehicleEvent)
+		return plugin.IDEventData{ID: int(value.ID)}
+	case samp.EventPlayerSync:
+		value := event.Data.(samp.PlayerEvent)
+		data := plugin.PlayerSyncEventData{ID: int(value.ID), X: value.X, Y: value.Y, Z: value.Z, Health: value.Health, Armour: value.Armour, Skin: int(value.Skin), Team: int(value.Team), Rotation: value.Rotation}
+		if value.HasColor {
+			data.Color = colorHex(value.Color)
+		}
+		return data
+	case samp.EventPosition:
+		value := event.Data.([3]float32)
+		return plugin.PositionEventData{X: value[0], Y: value[1], Z: value[2]}
+	case samp.EventAppearance:
+		value := event.Data.(samp.PlayerEvent)
+		data := plugin.AppearanceEventData{ID: int(value.ID)}
+		if value.HasPosition {
+			data.X, data.Y, data.Z = float32Ptr(value.X), float32Ptr(value.Y), float32Ptr(value.Z)
+		}
+		if value.HasSkin {
+			skin := int(value.Skin)
+			data.Skin = &skin
+		}
+		if value.HasTeam {
+			team := int(value.Team)
+			data.Team = &team
+		}
+		if value.HasRotation {
+			data.Rotation = float32Ptr(value.Rotation)
+		}
+		if value.HasColor {
+			color := colorHex(value.Color)
+			data.Color = &color
+		}
+		return data
+	case samp.EventVehicleState:
+		value := event.Data.(samp.VehicleStateEvent)
+		vehicleID := -1
+		if value.InVehicle {
+			vehicleID = int(value.VehicleID)
+		}
+		return plugin.VehicleStateEventData{InVehicle: value.InVehicle, Passenger: value.Passenger, VehicleID: vehicleID}
+	case samp.EventSpawned:
+		return struct{}{}
+	case samp.EventVehicleSync:
+		value := event.Data.(samp.VehicleEvent)
+		return plugin.VehicleEventData{ID: int(value.ID), ModelID: int(value.ModelID), X: value.X, Y: value.Y, Z: value.Z, Health: value.Health}
+	default:
+		// Unknown internal event types must not leak decoder structs into the
+		// public contract. Add an explicit DTO mapping when a new event lands.
+		return struct{}{}
+	}
+}
+
+func eventErrorText(value any) string {
+	if err, ok := value.(error); ok {
+		return err.Error()
+	}
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return fmt.Sprint(value)
+}
+
+func float32Ptr(value float32) *float32 { return &value }
 
 // PublishPluginEvent forwards plugin-host diagnostics and event envelopes to
 // browser subscribers without feeding them back into the plugin host.

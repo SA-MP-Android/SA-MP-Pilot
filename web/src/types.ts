@@ -166,6 +166,7 @@ export interface PluginManifest {
   args?: string[]
   events?: string[]
   enabled?: boolean
+  restart?: boolean
 }
 export interface PluginLog {
   at: string

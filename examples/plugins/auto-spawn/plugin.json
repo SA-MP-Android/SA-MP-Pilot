@@ -6,5 +6,6 @@
   "command": "node",
   "args": ["main.mjs"],
   "events": ["instance.created", "client.appearance", "client.chat"],
-  "enabled": true
+  "enabled": true,
+  "restart": true
 }

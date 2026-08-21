@@ -71,7 +71,7 @@ At runtime, the data directory contains:
 
 ## Plugin System
 
-Plugins are separate child processes, with Node.js/JavaScript as the recommended language. They can subscribe to client events and use instance APIs for chat, Dialogs, AFK, vehicles, teleportation, and other automation tasks.
+Plugins are separate child processes, with Node.js/JavaScript as the recommended language. They can subscribe to client events and use instance APIs for chat, Dialogs, AFK, vehicles, teleportation, instance management, and other automation tasks. Plugin event payloads use a stable camelCase JSON contract; plugin configuration and persistence remain owned by each plugin.
 
 See [PLUGINS.md](PLUGINS.md) for the complete plugin documentation, including the manifest, events, APIs, debugging, and the wire protocol.
 
@@ -81,7 +81,7 @@ The repository includes an example plugin at [`examples/plugins/auto-spawn`](exa
 ./bin/sa-mp-pilot -plugins examples/plugins
 ```
 
-Changes to `plugin.json` or source files automatically restart a running plugin. New and removed plugin directories are detected while the application is running. Plugins are trusted local code; the current version does not provide a permission model or a plugin marketplace. The HTTP API, including plugin debugging and lifecycle control, is intentionally restricted to loopback addresses.
+Changes to `plugin.json` or source files automatically restart a running plugin. Unexpected plugin exits are automatically restarted by default with bounded backoff. New and removed plugin directories are detected while the application is running. Plugins are trusted local code; the current version does not provide a permission model or a plugin marketplace. The HTTP API, including plugin debugging and lifecycle control, is intentionally restricted to loopback addresses.
 
 ## Project Structure
 

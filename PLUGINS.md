@@ -1,16 +1,12 @@
 # SA-MP-Pilot Plugin System
 
-The plugin system allows local JavaScript/Node.js processes to subscribe to SA-MP-Pilot events and perform automated operations through instance APIs.
+SA-MP-Pilot plugins are trusted local programs that run as separate child processes. The host and plugin communicate through one JSON object per line on stdin/stdout. Node.js/JavaScript is the recommended runtime, but any language can implement the same protocol.
 
-Plugins run as separate processes. The host and plugin communicate through JSON Lines on stdin/stdout. Python, Go, or any other language that can read and write JSON Lines can also be used to implement a plugin. Plugin stdout is reserved for protocol messages; JavaScript SDK `console` methods are redirected to plugin logs.
+The public plugin contract is defined by [`plugin/protocol.go`](plugin/protocol.go) and the JavaScript reference SDK at [`examples/plugins/auto-spawn/sdk.mjs`](examples/plugins/auto-spawn/sdk.mjs). Plugin-facing JSON uses camelCase consistently. Internal Go and SA-MP decoder field names are never part of the plugin contract.
 
-The host applies bounded resource policies: each plugin has a 256-message outbound queue and may drop high-frequency events when it cannot keep up; plugin logs retain the most recent 500 entries and truncate each entry at 16 KiB; protocol messages are limited to 1 MiB; subscriptions are limited to 256 entries of 256 bytes each; and each plugin may have at most 32 concurrent API calls. The plugin list reports `eventsDropped` so automation can detect overload.
+## Quick start
 
-## Quick Start
-
-### Directory Layout
-
-The default plugin directory is `<data>/plugins`. Each direct child directory is treated as a plugin:
+The default plugin directory is `<data>/plugins`. Every direct child directory containing `plugin.json` is a plugin:
 
 ```text
 plugins/
@@ -20,21 +16,7 @@ plugins/
     └── sdk.mjs
 ```
 
-The directory can be overridden from the command line:
-
-```sh
-./bin/sa-mp-pilot -plugins /path/to/plugins
-```
-
-To run the repository example:
-
-```sh
-./bin/sa-mp-pilot -plugins examples/plugins
-```
-
-### Minimal Manifest
-
-`plugin.json` requires at least `id` and `command`:
+Run the application with a custom plugin directory using `-plugins /path/to/plugins`. The repository example can be run with `-plugins examples/plugins`.
 
 ```json
 {
@@ -45,265 +27,197 @@ To run the repository example:
   "command": "node",
   "args": ["main.mjs"],
   "events": ["client.chat"],
-  "enabled": true
+  "enabled": true,
+  "restart": true
 }
 ```
 
+Manifest fields:
+
 | Field | Type | Description |
 | --- | --- | --- |
-| `id` | `string` | Required, path-safe, and unique |
-| `name` | `string` | Display name |
-| `version` | `string` | Plugin version |
-| `description` | `string` | Plugin description |
-| `command` | `string` | Startup command, such as `node` |
-| `args` | `string[]` | Arguments passed to the startup command |
-| `events` | `string[]` | Initial event subscriptions; omitted or empty means all events |
-| `enabled` | `boolean` | Set to `false` to prevent startup |
+| `id` | string | Required, unique, path-safe plugin identifier |
+| `name` | string | Display name |
+| `version` | string | Plugin version chosen by the author |
+| `description` | string | Human-readable description |
+| `command` | string | Executable, for example `node`, `python`, or an absolute path |
+| `args` | string[] | Arguments passed to the executable |
+| `events` | string[] | Initial subscriptions; omitted or empty means `*` until the plugin sends its ready subscription set |
+| `enabled` | boolean | `false` prevents startup |
+| `restart` | boolean | Unexpected exits are automatically restarted with exponential backoff; defaults to `true` |
 
-The host starts the process with the plugin directory as its working directory. A relative command containing a path separator is resolved relative to the plugin directory.
+The process working directory is the plugin directory. A relative command containing a path separator is resolved relative to that directory. Plugin configuration, files, databases, and persistent state belong to the plugin and may be managed by its own language/runtime.
 
 ## JavaScript SDK
 
-You can copy [`examples/plugins/auto-spawn/sdk.mjs`](examples/plugins/auto-spawn/sdk.mjs) as a starting point. A minimal plugin looks like this:
+Copy the reference SDK into a plugin directory. It is intentionally a plain `.mjs` file and does not require npm installation.
 
 ```js
-import { EVENT_CHAT, log, on, start } from './sdk.mjs'
+import { EVENT_CLIENT_CHAT, instanceApi, log, on, start } from './sdk.mjs'
 
-on(EVENT_CHAT, (event, instance) => {
-  log('info', `[${event.instanceId}] ${event.data.Text ?? ''}`)
+on(EVENT_CLIENT_CHAT, (event, instance) => {
+  log('info', `[${event.instanceId}] ${event.data.text}`)
+  void instance.sendChat('hello')
 })
 
 await start()
 ```
 
-The SDK exports:
+Exports:
 
 | Export | Purpose |
 | --- | --- |
-| `on(pattern, handler)` | Register an event handler and return an unsubscribe function |
-| `start()` | Send `ready` to the host and start processing messages |
-| `log(level, message)` | Write a plugin log entry |
-| `api(method, instanceId, params)` | Call a low-level API method |
-| `instanceApi(instanceId)` | Create a convenience API for one instance |
-| `dispatch(event)` | Dispatch a test event to the plugin's registered handlers |
+| `on(pattern, handler)` | Register a handler and return an unsubscribe function |
+| `dispatch(event)` | Dispatch a synthetic event to matching handlers |
+| `start()` | Send the ready handshake and process host messages; may only be called once |
+| `log(level, message)` | Send a bounded log entry to the host |
+| `api(method, instanceId, params)` | Low-level API call |
+| `instanceApi(instanceId)` | Typed convenience methods for one instance |
+| `instancesApi()` | Instance listing, creation, update, and deletion methods |
+| `MAX_SUBSCRIPTIONS`, `MAX_SUBSCRIPTION_BYTES` | Subscription limits enforced by the host and SDK |
+| `LOG_LEVEL_INFO`, `LOG_LEVEL_WARN`, `LOG_LEVEL_ERROR` | Standard log-level constants |
+| `EVENTS` | Frozen map of all supported event names |
+| `METHOD` | Frozen map of all supported API method names |
 
-Event handlers receive objects with this shape:
+`on()` accepts exact names, suffix wildcards such as `client.*`, and `*`. Event handler failures are isolated and written to the plugin log. Event handlers may run concurrently; plugins that require ordering must implement their own queue.
+
+The SDK validates event patterns, bounds log messages to 16 KiB, rejects non-JSON API parameters immediately, and always attempts to return a debug error instead of leaving the host request waiting for a timeout.
+
+## Event envelope
+
+Every event delivered to a plugin has this shape:
 
 ```js
 {
   name: 'client.dialog',
   instanceId: 'instance-id',
   time: '2026-01-01T00:00:00.000Z',
-  data: { /* event data */ },
+  data: { /* event-specific camelCase data */ }
 }
 ```
 
-`instanceApi(instanceId)` can be used as follows:
+`instanceId` is omitted for global events. Host events use the following data:
+
+| Event | `data` |
+| --- | --- |
+| `instance.created` | Instance snapshot; chat history is delivered separately through `chat.message`/`instance.getChat` |
+| `instance.updated` | Incremental patch: `{ revision, syncEpoch, operations }` |
+| `instance.deleted` | Omitted |
+| `chat.message` | `{ id, text, color, at }` |
+| `chat.reset` | Omitted |
+
+`instance.updated` operations currently replace top-level snapshot paths. A plugin should use `instance.getSnapshot()` as its recovery source when it misses events or does not want to implement patch application.
+
+## Client events
+
+All client payloads use camelCase. IDs inside entity payloads are named `id`; `playerId` is used only where the value specifically identifies a player in another object.
+
+| Event | Data |
+| --- | --- |
+| `client.joined` | `{ playerId }` |
+| `client.chat` | `{ text, color?, playerId? }` |
+| `client.player.join` | `{ id, name, color? }` |
+| `client.player.quit` | `{ id }` |
+| `client.scores` | `[{ id, score, ping }]` |
+| `client.dialog` | `{ id, style, title, message, button1, button2 }`; a negative `id` indicates the server closed the active Dialog |
+| `client.disconnected` | `{ reason }` |
+| `client.protocol.error` | `{ message }` |
+| `client.textdraw.show` | Complete TextDraw data: `id`, `text`, `style`, `flags`, `shadow`, `outline`, `selectable`, `letterColor`, `boxColor`, `backgroundColor`, `x`, `y`, `letterWidth`, `letterHeight`, `lineWidth`, `lineHeight`, `modelId` |
+| `client.textdraw.hide` | `{ id }` |
+| `client.textdraw.text` | `{ id, text }` |
+| `client.object.add` | `{ id, modelId, x, y, z }` |
+| `client.object.remove` | `{ id }` |
+| `client.vehicle.add` | `{ id, modelId, x, y, z, health }` |
+| `client.vehicle.remove` | `{ id }` |
+| `client.player.sync` | `{ id, x, y, z, health, armour, skin, team, rotation, color? }` |
+| `client.position` | `{ x, y, z }` |
+| `client.appearance` | `{ id, x?, y?, z?, skin?, team?, rotation?, color? }`; only fields present in the server update are included |
+| `client.vehicle.state` | `{ inVehicle, passenger, vehicleId }`; `vehicleId` is `-1` when not in a vehicle |
+| `client.spawned` | `{}` |
+| `client.vehicle.sync` | `{ id, modelId, x, y, z, health }` |
+
+Color values are eight-digit strings such as `#11223344`. Chat color is optional when the server packet does not provide one. Dialog event data intentionally excludes the internal raw encoded message; the host uses that data internally when responding to list dialogs.
+
+## API
+
+### One instance
 
 ```js
-import { instanceApi } from './sdk.mjs'
-
-const instance = instanceApi(event.instanceId)
+const instance = instanceApi(instanceId)
 
 await instance.getSnapshot()
+await instance.getChat({ before: 0, limit: 50 })
+await instance.connect()
+await instance.disconnect()
 await instance.sendChat('hello')
 await instance.sendCommand('/help')
+await instance.requestSpawn()
+await instance.refreshScores()
+await instance.setKeys(0)
 await instance.setAFK(true)
+await instance.teleport(1, 2, 3)
+await instance.enterVehicle(411)
+await instance.exitVehicle()
+await instance.respondDialog(12, 1, 0, 'password')
+await instance.clickPlayer(42)
+await instance.clickTextDraw(7)
+await instance.addCommand({ label: 'Help', command: '/help' })
+await instance.deleteCommand(commandId)
 ```
 
-### Subscription Matching
+`instance.call(method, params)` is available for forward-compatible or generic calls. `instance.action(action, params)` supports the current UI actions `chat`, `spawn`, `keys`, `afk`, `teleport`, `enterVehicle`, `exitVehicle`, `dialog`, `textDraw`, `clickPlayer`, `deferDialog`, `showDialog`, and `dismissDialog`.
 
-Subscriptions support exact matching, prefix matching, and a catch-all pattern:
-
-| Subscription | Matches |
-| --- | --- |
-| `client.dialog` | Only `client.dialog` |
-| `client.*` | Every event beginning with `client.` |
-| `*` | Every event |
-
-Errors thrown by event handlers are written to the plugin log and do not block the host's network loop.
-
-## Events
-
-### Host Events
-
-| Event | Description |
-| --- | --- |
-| `instance.created` | A new instance was created |
-| `instance.updated` | An instance snapshot changed |
-| `instance.deleted` | An instance was deleted |
-| `chat.message` | A chat history entry was added |
-| `chat.reset` | Chat history was reset |
-
-### Client Events
-
-Client events use the `client.` prefix. The currently available events are:
-
-| Event | `data` contents |
-| --- | --- |
-| `client.joined` | Local player ID |
-| `client.chat` | Chat message: `Text`, `Color`, and optional `PlayerID` |
-| `client.player.join` | Player ID, name, and color |
-| `client.player.quit` | Player ID |
-| `client.scores` | Player score and ping list |
-| `client.dialog` | Dialog: `ID`, `Style`, `Title`, `Message`, `Button1`, and `Button2` |
-| `client.disconnected` | Disconnect reason |
-| `client.protocol.error` | Protocol error information |
-| `client.textdraw.show` | Complete TextDraw data |
-| `client.textdraw.hide` | TextDraw ID |
-| `client.textdraw.text` | TextDraw ID and text |
-| `client.object.add` | Object ID, model, and coordinates |
-| `client.object.remove` | Object ID |
-| `client.vehicle.add` | Vehicle ID, model, and coordinates |
-| `client.vehicle.remove` | Vehicle ID |
-| `client.player.sync` | Player synchronization data |
-| `client.position` | `[x, y, z]` |
-| `client.appearance` | Player appearance or spawn data |
-| `client.vehicle.state` | Vehicle and passenger state |
-| `client.spawned` | The local player has spawned |
-| `client.vehicle.sync` | Vehicle synchronization data |
-
-Raw client event data comes from Go protocol structures, so field names are generally preserved with an uppercase first letter. For example, a Dialog title is `event.data.Title`. Instance snapshots use the camelCase JSON API fields, such as `snapshot.activeDialog` and `snapshot.players`.
-
-Dialog automation example:
+### Instance management
 
 ```js
-import { api, on, start } from './sdk.mjs'
-
-on('client.dialog', async (event) => {
-  if (event.data.Title !== 'Login Window') return
-
-  await api('instance.respondDialog', event.instanceId, {
-    dialogId: event.data.ID,
-    buttonId: 1,
-    listItem: 0,
-    inputText: 'password',
-  })
-})
-
-await start()
+const instances = instancesApi()
+const all = await instances.list()
+const created = await instances.create({ host: '127.0.0.1', port: 7777, nickname: 'Pilot', password: '' })
+await instances.update(created.server.id, { host: '127.0.0.1', port: 7777, nickname: 'Pilot', password: '' })
+await instances.delete(created.server.id)
 ```
 
-## Instance APIs
-
-`instanceApi(instanceId)` provides the following methods:
-
-| Method | Parameters | Purpose |
-| --- | --- | --- |
-| `getSnapshot()` | None | Get the complete instance snapshot |
-| `getChat(options?)` | `before`, `limit` | Get a page of chat history |
-| `sendChat(text)` | `text` | Send chat text; strings beginning with `/` are sent as commands |
-| `sendCommand(command)` | `command` | Send a server command; `/` is added automatically |
-| `requestSpawn()` | None | Request a spawn |
-| `refreshScores()` | None | Request a player score refresh |
-| `setKeys(mask)` | `mask` | Send a key mask |
-| `setAFK(enabled)` | `enabled` | Enable or disable AFK |
-| `teleport(x, y, z)` | Coordinates | Set the position and send synchronization |
-| `enterVehicle(vehicleId, passenger?)` | Vehicle ID, passenger flag | Enter a vehicle |
-| `exitVehicle()` | None | Exit a vehicle |
-| `respondDialog(dialogId, buttonId, listItem?, inputText?)` | Dialog parameters | Send a Dialog response |
-| `clickPlayer(playerId)` | Player ID | Click a player |
-| `clickTextDraw(textDrawId)` | TextDraw ID | Click a TextDraw |
-| `call(method, params?)` | Low-level method and parameters | Call any plugin API method |
-
-The top-level `api(method, instanceId, params)` function also supports:
+Low-level method names are:
 
 | Method | Purpose |
 | --- | --- |
-| `instances.list` | Get all instance snapshots |
-| `instance.getSnapshot` | Get a specific instance snapshot |
-| `instance.getChat` | Get a chat history page |
-| `instance.connect` | Connect an instance |
-| `instance.disconnect` | Disconnect an instance |
-| `instance.sendChat` | Send chat |
-| `instance.sendCommand` | Send a command |
+| `instances.list` | List snapshots |
+| `instances.create` | Create an instance from a server configuration |
+| `instances.update` | Update the instance server configuration |
+| `instances.delete` | Delete an instance |
+| `instance.getSnapshot` | Get one snapshot |
+| `instance.getChat` | Get paginated chat history |
+| `instance.connect` / `instance.disconnect` | Control connection lifecycle |
+| `instance.sendChat` / `instance.sendCommand` | Send chat or a server command |
 | `instance.requestSpawn` | Request a spawn |
-| `instance.refreshScores` | Refresh scores |
-| `instance.setKeys` | Send a key mask |
-| `instance.setAFK` | Set AFK |
-| `instance.teleport` | Teleport |
-| `instance.enterVehicle` | Enter a vehicle |
-| `instance.exitVehicle` | Exit a vehicle |
+| `instance.refreshScores` | Request score refresh |
+| `instance.setKeys` / `instance.setAFK` | Control input state |
+| `instance.teleport` | Teleport and synchronize |
+| `instance.enterVehicle` / `instance.exitVehicle` | Vehicle control |
 | `instance.respondDialog` | Respond to a Dialog |
-| `instance.clickPlayer` | Click a player |
-| `instance.clickTextDraw` | Click a TextDraw |
-| `instance.action` | Call the generic action extension point |
+| `instance.clickPlayer` / `instance.clickTextDraw` | Click UI targets |
+| `instance.commands.add` / `instance.commands.delete` | Manage Quick Commands |
+| `instance.action` | Generic action extension point |
 
-### Snapshot Example
+Missing or invalid typed parameters return an API error. Numeric values must be finite integers where an ID/mask is expected; coordinates must be finite numbers. Errors are returned as strings in the protocol `error` field and rejected as JavaScript `Error` objects by the SDK.
 
-```js
-const snapshot = await api.getSnapshot()
+## Lifecycle and hot reload
 
-return {
-  status: snapshot.connection.status,
-  players: snapshot.players.length,
-  position: snapshot.players.find((player) => player.id === 0),
-}
-```
+The host scans the plugin directory at startup and watches it once per second. New valid plugin directories are started, removed directories are stopped and removed, and changes to plugin files restart the plugin. `node_modules/` is excluded from file-change detection.
 
-## Browser Debug Console
+Statuses:
 
-The global Debug Console is separate from the plugin manager. It runs temporary code inside a selected running plugin process, so the selected plugin is the execution context rather than a plugin being edited inline.
-
-Debug execution has a 5-second synchronous VM limit and a 15-second asynchronous request limit. Debug source is limited to 256 KiB. API calls made by JavaScript plugins expire after 15 seconds if the host does not answer. A debug request is rejected while its plugin is still `starting`; wait for the `running` status after the `ready` handshake.
-
-- `Run`: execute the current JavaScript
-- Plugin manager: `Start`, `Stop`, and `Restart` control the plugin lifecycle
-- Logs: inspect plugin stdout/stderr and host errors
-- Live events: inspect events sent to the plugin
-
-Debug code can interact with that plugin context in four ways:
-
-- `api` and `instanceApi()`: call SA-MP-Pilot instance APIs
-- `on()`: register an event handler; subscriptions are sent to the host immediately and remain active until the returned unsubscribe function is called or the plugin restarts
-- `dispatch()`: manually trigger registered handlers with a test event
-- `state`: a persistent object shared by debug evaluations in that plugin process
-
-The console does not expose the lexical variables inside `main.mjs`. Use `state` for temporary debug state, or explicitly expose application state from the plugin when needed.
-
-The debug console is intended for trusted local users. The executable refuses non-loopback HTTP listen addresses because plugin debug and lifecycle endpoints are not remotely authenticated.
-
-Debug code can use the current instance's `api` object:
-
-```js
-const snapshot = await api.getSnapshot()
-return snapshot.players.map((player) => player.name)
-```
-
-For example, this registers a debug handler and tests it without waiting for a server event:
-
-```js
-state.lastMessage = null
-on('client.chat', (event) => {
-  state.lastMessage = event.data
-})
-
-await dispatch({
-  name: 'client.chat',
-  instanceId: 'instance-id',
-  data: { Text: 'debug message' },
-})
-
-return state.lastMessage
-```
-
-Debug code is not saved as plugin source. Plugin source files and the manifest must still be maintained in the plugin directory.
-
-## Lifecycle and Hot Reload
-
-At startup, the host scans the plugin directory and starts plugins whose `enabled` field is not `false`. New and removed plugin directories are detected while the application is running. Changes to plugin files automatically restart the corresponding plugin. Changes under `node_modules/` do not trigger hot reloads. A plugin must send the `ready` message during startup; otherwise it is stopped after the handshake timeout.
-
-Plugin statuses are:
-
-| Status | Description |
+| Status | Meaning |
 | --- | --- |
-| `starting` | The process started and the host is waiting for its `ready` handshake |
-| `running` | The plugin process is running |
-| `stopped` | The plugin has stopped |
-| `disabled` | The manifest disabled the plugin |
-| `error` | Startup or runtime failure |
+| `starting` | Process started and waiting for `ready` |
+| `running` | Ready handshake completed |
+| `stopped` | Intentionally stopped or exited with auto-restart disabled |
+| `disabled` | Manifest has `enabled: false` |
+| `error` | Startup, protocol, or runtime failure |
 
-The HTTP API also provides lifecycle endpoints:
+Unexpected exits are restarted by default after 1, 2, 4 seconds and so on, capped at 30 seconds. A stable plugin resets its backoff after the ready handshake. Set `restart` to `false` when a plugin should remain stopped after a crash.
+
+The HTTP API provides:
 
 ```text
 GET  /api/plugins
@@ -313,35 +227,41 @@ POST /api/plugins/{id}/stop
 POST /api/plugins/{id}/restart
 ```
 
-## JSON Lines Protocol
+## Browser Debug Console
 
-Language runtimes can implement the protocol defined in [`plugin/protocol.go`](plugin/protocol.go) directly.
+The browser Debug Console executes temporary JavaScript inside a selected running plugin process. It is not a source editor: changes are not saved to the plugin directory. Use `state` for values that should survive between debug evaluations in the same process.
 
-The host and plugin exchange one JSON object per line. The current protocol version is `1`. Common message types include:
+Debug code can use `api`, `instanceApi()`, `instancesApi()`, `on()`, `dispatch()`, `log()`, and `console`. For example:
 
-| Type | Direction | Description |
+```js
+const snapshot = await api.getSnapshot()
+return snapshot.players.map((player) => player.name)
+```
+
+The host limits debug source to 256 KiB, synchronous execution to 5 seconds, and asynchronous execution to 15 seconds. The plugin must already be `running`; calls made while it is `starting` are rejected. Debug code has the same trusted-process permissions as the plugin and the JavaScript VM is not a security boundary.
+
+## JSON Lines protocol
+
+The current pre-release protocol version is `1`. This version defines canonical camelCase client payloads and explicit empty-subscription semantics. A plugin that reports an incompatible version is rejected during the ready handshake.
+
+| Type | Direction | Purpose |
 | --- | --- | --- |
 | `hello` | Host → plugin | Protocol version and plugin ID |
-| `ready` | Plugin → host | Plugin startup completion and subscriptions |
-| `event` | Host → plugin | A subscribed event |
-| `call` | Plugin → host | An instance API request |
-| `result` | Host → plugin | API result |
-| `debug` | Host → plugin | Execute debug code |
-| `debug.result` | Plugin → host | Debug result |
-| `log` | Plugin → host | Plugin log entry |
-| `subscribe` | Plugin → host | Update event subscriptions |
+| `ready` | Plugin → host | Startup completion and initial subscriptions |
+| `event` | Host → plugin | A matching event |
+| `call` | Plugin → host | API request with correlation ID |
+| `result` | Host → plugin | API response |
+| `subscribe` | Plugin → host | Replace runtime subscriptions |
+| `log` | Plugin → host | Structured plugin log |
+| `debug` | Host → plugin | Execute trusted debug code |
+| `debug.result` | Plugin → host | Debug result or error |
 
-Protocol data and parameters remain open-ended. New client capabilities can be exposed through `instance.action` without changing the overall host and SDK structure immediately.
+An explicit empty `events: []` in `ready` or `subscribe` means no subscriptions. An omitted or `null` `events` field means “do not change the manifest/default subscription set” for `ready`; `subscribe` must include an `events` array containing the complete replacement set. Subscription patterns are exact names, suffix wildcards such as `client.*`, or `*`.
 
-## Security Boundary
+The host limits each plugin to a 256-message outbound queue, 1 MiB protocol messages, 256 subscriptions of at most 256 bytes each, 500 retained log entries, 16 KiB per log entry, and 32 concurrent API calls. High-frequency events may be dropped when a plugin cannot keep up; `eventsDropped` is exposed by `GET /api/plugins`. Event delivery is not replayable, so plugins should bootstrap from `instances.list`/`instance.getSnapshot` and recover from a dropped-event gap with a fresh snapshot.
 
-Plugins have the same local process permissions as the user running SA-MP-Pilot. They can read and write files, access the network, and start other processes. The current version provides:
+## Security boundary
 
-- No permission sandbox
-- No plugin signature verification
-- No plugin marketplace
-- No resource isolation between plugins
-
-The JavaScript `vm` context is an execution context, not a security boundary. Debug code must therefore be treated as trusted local code, just like the plugin itself.
+Plugins run with the same operating-system permissions as SA-MP-Pilot. They can read/write files, access the network, and start other processes. There is currently no sandbox, signature verification, marketplace, or per-plugin permission isolation. The browser debug console executes code inside the selected plugin process and is only suitable for trusted local users. The executable refuses non-loopback HTTP listen addresses because these endpoints are not remotely authenticated.
 
 Only install and run plugins you trust.

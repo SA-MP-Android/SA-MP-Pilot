@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/SA-MP-Android/SA-MP-Pilot/plugin"
 )
@@ -50,7 +51,7 @@ func TestHostLifecycleAndHotReload(t *testing.T) {
 	writePlugin := func(result string) {
 		script := `const readline = require('node:readline')
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity })
-process.stdout.write(JSON.stringify({ type: 'ready', events: ['*'] }) + '\n')
+process.stdout.write(JSON.stringify({ type: 'ready', protocol: 1, events: ['*'] }) + '\n')
 rl.on('line', (line) => {
   const message = JSON.parse(line)
   if (message.type === 'debug') process.stdout.write(JSON.stringify({ type: 'debug.result', id: message.id, result: '` + result + `' }) + '\n')
@@ -116,12 +117,12 @@ eventObserved:
 		t.Fatal(err)
 	}
 	waitRunning()
-	writePlugin("v2-reloaded")
+	writePlugin("v1-reloaded")
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if host.List()[0].Status == plugin.StatusRunning {
 			result, debugErr := host.Debug(context.Background(), "demo", "", "return true")
-			if debugErr == nil && result.Result == "v2-reloaded" {
+			if debugErr == nil && result.Result == "v1-reloaded" {
 				return
 			}
 		}
@@ -130,12 +131,58 @@ eventObserved:
 	t.Fatalf("hot reload did not update debug result: %+v", host.List())
 }
 
+func TestHostAutomaticallyRestartsUnexpectedExit(t *testing.T) {
+	root := t.TempDir()
+	pluginDir := filepath.Join(root, "plugins", "demo")
+	marker := filepath.Join(root, "starts")
+	if err := os.MkdirAll(pluginDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := json.Marshal(plugin.Manifest{ID: "demo", Command: "node", Args: []string{"main.cjs", marker}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, manifestFile), manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := `const fs = require('node:fs')
+fs.appendFileSync(process.argv[2], 'x')
+process.stdout.write(JSON.stringify({ type: 'ready', protocol: 1, events: [] }) + '\n')
+setTimeout(() => process.exit(1), 25)
+`
+	if err := os.WriteFile(filepath.Join(pluginDir, "main.cjs"), []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	host, err := New(filepath.Join(root, "plugins"), nil, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	waitUntil(t, 4*time.Second, func() bool {
+		data, readErr := os.ReadFile(marker)
+		return readErr == nil && len(data) >= 2
+	})
+}
+
 func TestNormalizeSubscriptionsDefaultsToAll(t *testing.T) {
 	if got := normalizeSubscriptions(nil); len(got) != 1 || got[0] != "*" {
 		t.Fatalf("default subscriptions = %v", got)
 	}
 	if got := normalizeSubscriptions([]string{" ", "client.chat"}); len(got) != 1 || got[0] != "client.chat" {
 		t.Fatalf("normalized subscriptions = %v", got)
+	}
+}
+
+func TestSubscriptionPatternsAreExactOrSuffixWildcards(t *testing.T) {
+	for _, pattern := range []string{"client.chat", "client.*", "*"} {
+		if !validSubscriptionPattern(pattern) {
+			t.Fatalf("validSubscriptionPattern(%q) = false", pattern)
+		}
+	}
+	for _, pattern := range []string{"", "*client", "client.*.chat", "client**"} {
+		if validSubscriptionPattern(pattern) {
+			t.Fatalf("validSubscriptionPattern(%q) = true", pattern)
+		}
 	}
 }
 
@@ -188,6 +235,50 @@ func TestOutboundProtocolMessageIsBounded(t *testing.T) {
 	}
 }
 
+func TestMessageEventsPreservesOmittedAndEmptySemantics(t *testing.T) {
+	if err := validateMessage(plugin.Message{Type: plugin.MessageReady, Protocol: 2}); err == nil {
+		t.Fatal("protocol v2 unexpectedly passed the v1 ready handshake")
+	}
+	if err := validateMessage(plugin.Message{Type: plugin.MessageSubscribe}); err == nil {
+		t.Fatal("subscribe without an events array unexpectedly succeeded")
+	}
+
+	withoutEvents, err := json.Marshal(plugin.Message{Type: plugin.MessageHello})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(withoutEvents), `"events"`) {
+		t.Fatalf("message without events serialized an events field: %s", withoutEvents)
+	}
+	if strings.Contains(string(withoutEvents), `"time"`) {
+		t.Fatalf("message without a time serialized a zero time: %s", withoutEvents)
+	}
+
+	emptyEvents := []string{}
+	withEmptyEvents, err := json.Marshal(plugin.Message{Type: plugin.MessageReady, Events: &emptyEvents})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(withEmptyEvents), `"events":[]`) {
+		t.Fatalf("message with an explicit empty events set serialized incorrectly: %s", withEmptyEvents)
+	}
+
+	var decoded plugin.Message
+	if err := json.Unmarshal([]byte(`{"type":"ready","events":[]}`), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Events == nil || len(*decoded.Events) != 0 {
+		t.Fatalf("decoded empty events set = %v, want non-nil empty slice", decoded.Events)
+	}
+	var omitted plugin.Message
+	if err := json.Unmarshal([]byte(`{"type":"ready"}`), &omitted); err != nil {
+		t.Fatal(err)
+	}
+	if omitted.Events != nil {
+		t.Fatalf("decoded omitted events set = %v, want nil", omitted.Events)
+	}
+}
+
 func TestPluginStderrLinesAreBounded(t *testing.T) {
 	reader := bufio.NewReader(strings.NewReader(strings.Repeat("x", pluginMaxLogMessageBytes*2) + "\nnext\n"))
 	line, err := readBoundedLogLine(reader, pluginMaxLogMessageBytes)
@@ -218,9 +309,36 @@ func TestPluginLogsAreBounded(t *testing.T) {
 	}
 }
 
+func TestPluginLogTruncationPreservesUTF8(t *testing.T) {
+	message := truncate(strings.Repeat("a", pluginMaxLogMessageBytes-1)+"😀", pluginMaxLogMessageBytes)
+	if len(message) > pluginMaxLogMessageBytes || !utf8.ValidString(message) {
+		t.Fatalf("truncated plugin log is not valid UTF-8 within the byte limit: bytes=%d valid=%v", len(message), utf8.ValidString(message))
+	}
+}
+
 func TestNormalizeRuntimeSubscriptionsAllowsEmptySet(t *testing.T) {
 	if got := normalizeRuntimeSubscriptions(nil); len(got) != 0 {
 		t.Fatalf("empty runtime subscriptions = %v, want empty", got)
+	}
+}
+
+func TestReadyMessageCanClearManifestSubscriptions(t *testing.T) {
+	host := &Host{observerQueue: make(chan plugin.Event, 4), observerStop: make(chan struct{}), processes: map[string]*process{}}
+	p := host.newProcess(plugin.Manifest{ID: "demo", Command: "node", Events: []string{"client.chat"}}, t.TempDir())
+	p.status = plugin.StatusStarting
+	emptyEvents := []string{}
+	p.handle(plugin.Message{Type: plugin.MessageReady, Protocol: plugin.ProtocolVersion, Events: &emptyEvents})
+	if len(p.events) != 0 {
+		t.Fatalf("ready with an explicit empty subscription set left events = %v", p.events)
+	}
+}
+
+func TestValidateManifestBoundsSubscriptions(t *testing.T) {
+	if err := validateManifest(plugin.Manifest{ID: "demo", Command: "node", Events: []string{strings.Repeat("x", pluginMaxSubscriptionBytes+1)}}); err == nil {
+		t.Fatal("oversized manifest subscription unexpectedly succeeded")
+	}
+	if err := validateManifest(plugin.Manifest{ID: "demo", Command: "node", Events: make([]string, pluginMaxSubscriptionCount+1)}); err == nil {
+		t.Fatal("manifest subscription count unexpectedly succeeded")
 	}
 }
 

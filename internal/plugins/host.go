@@ -13,10 +13,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/SA-MP-Android/SA-MP-Pilot/plugin"
 )
@@ -35,6 +37,8 @@ const (
 	pluginMaxSubscriptionBytes  = 256
 	pluginMaxConcurrentAPICalls = 32
 	pluginObserverQueueCapacity = 256
+	pluginRestartInitialDelay   = time.Second
+	pluginRestartMaxDelay       = 30 * time.Second
 	nodeModulesDir              = "node_modules"
 )
 
@@ -65,28 +69,30 @@ type Host struct {
 }
 
 type process struct {
-	host          *Host
-	manifest      plugin.Manifest
-	command       *exec.Cmd
-	stdin         io.WriteCloser
-	out           *messageQueue
-	done          chan struct{}
-	finish        sync.Once
-	mu            sync.RWMutex
-	status        string
-	errText       string
-	dir           string
-	events        []string
-	logs          []plugin.Log
-	pending       map[uint64]chan plugin.Message
-	ready         chan struct{}
-	readyOnce     sync.Once
-	debugSlot     chan struct{}
-	stopRequested atomic.Bool
-	apiSlots      chan struct{}
-	nextID        atomic.Uint64
-	sent          atomic.Uint64
-	dropped       atomic.Uint64
+	host             *Host
+	manifest         plugin.Manifest
+	command          *exec.Cmd
+	stdin            io.WriteCloser
+	out              *messageQueue
+	done             chan struct{}
+	finish           sync.Once
+	mu               sync.RWMutex
+	status           string
+	errText          string
+	dir              string
+	events           []string
+	logs             []plugin.Log
+	pending          map[uint64]chan plugin.Message
+	ready            chan struct{}
+	readyOnce        sync.Once
+	debugSlot        chan struct{}
+	stopRequested    atomic.Bool
+	apiSlots         chan struct{}
+	nextID           atomic.Uint64
+	sent             atomic.Uint64
+	dropped          atomic.Uint64
+	restartAttempt   int
+	restartScheduled atomic.Bool
 }
 
 type messageQueue struct {
@@ -280,6 +286,17 @@ func validateManifest(manifest plugin.Manifest) error {
 	if manifest.Command == "" {
 		return errors.New("plugin command is required")
 	}
+	if len(manifest.Events) > pluginMaxSubscriptionCount {
+		return fmt.Errorf("too many plugin subscriptions: maximum is %d", pluginMaxSubscriptionCount)
+	}
+	for _, event := range manifest.Events {
+		if len(event) > pluginMaxSubscriptionBytes {
+			return fmt.Errorf("plugin subscription is too large: maximum is %d bytes", pluginMaxSubscriptionBytes)
+		}
+		if !validSubscriptionPattern(strings.TrimSpace(event)) {
+			return fmt.Errorf("invalid plugin subscription pattern %q", event)
+		}
+	}
 	return nil
 }
 
@@ -346,6 +363,7 @@ func (h *Host) replaceProcess(id string, old *process, manifest plugin.Manifest,
 	}
 	p.sent.Store(old.sent.Load())
 	p.dropped.Store(old.dropped.Load())
+	p.restartAttempt = old.restartAttempt
 	old.mu.RUnlock()
 	if manifest.Enabled != nil && !*manifest.Enabled {
 		p.mu.Lock()
@@ -554,16 +572,27 @@ func validateMessage(message plugin.Message) error {
 	if len(message.Message) > pluginMaxLogMessageBytes {
 		return fmt.Errorf("%w: log message is too large", errPluginMessageLarge)
 	}
-	if len(message.Events) > pluginMaxSubscriptionCount {
-		return fmt.Errorf("%w: too many subscriptions", errPluginProtocol)
-	}
-	for _, event := range message.Events {
-		if len(event) > pluginMaxSubscriptionBytes {
-			return fmt.Errorf("%w: subscription is too large", errPluginProtocol)
+	if message.Events != nil {
+		if len(*message.Events) > pluginMaxSubscriptionCount {
+			return fmt.Errorf("%w: too many subscriptions", errPluginProtocol)
 		}
+		for _, event := range *message.Events {
+			if len(event) > pluginMaxSubscriptionBytes {
+				return fmt.Errorf("%w: subscription is too large", errPluginProtocol)
+			}
+			if !validSubscriptionPattern(strings.TrimSpace(event)) {
+				return fmt.Errorf("%w: invalid subscription pattern %q", errPluginProtocol, event)
+			}
+		}
+	}
+	if message.Type == plugin.MessageSubscribe && message.Events == nil {
+		return fmt.Errorf("%w: subscribe requires an events array", errPluginProtocol)
 	}
 	if message.Type == plugin.MessageCall && message.Method == "" {
 		return fmt.Errorf("%w: API method is required", errPluginProtocol)
+	}
+	if message.Type == plugin.MessageReady && message.Protocol != plugin.ProtocolVersion {
+		return fmt.Errorf("%w: unsupported protocol version %d", errPluginProtocol, message.Protocol)
 	}
 	return nil
 }
@@ -615,27 +644,30 @@ func readBoundedLogLine(reader *bufio.Reader, maxBytes int) (string, error) {
 func (p *process) handle(message plugin.Message) {
 	switch message.Type {
 	case plugin.MessageReady:
-		if message.Protocol != 0 && message.Protocol != plugin.ProtocolVersion {
-			p.fail(fmt.Errorf("%w: unsupported protocol version %d", errPluginProtocol, message.Protocol))
-			return
-		}
 		ready := false
 		p.mu.Lock()
 		if p.status == plugin.StatusStarting {
 			p.status = plugin.StatusRunning
 			ready = true
 		}
-		if len(message.Events) > 0 {
-			p.events = normalizeSubscriptions(message.Events)
+		if message.Events != nil {
+			p.events = normalizeRuntimeSubscriptions(*message.Events)
 		}
 		p.mu.Unlock()
 		if ready {
+			p.mu.Lock()
+			p.restartAttempt = 0
+			p.mu.Unlock()
 			p.readyOnce.Do(func() { close(p.ready) })
 			p.host.notifyStatus(p)
 		}
 	case plugin.MessageSubscribe:
 		p.mu.Lock()
-		p.events = normalizeRuntimeSubscriptions(message.Events)
+		if message.Events == nil {
+			p.events = normalizeRuntimeSubscriptions(nil)
+		} else {
+			p.events = normalizeRuntimeSubscriptions(*message.Events)
+		}
 		p.mu.Unlock()
 	case plugin.MessageCall:
 		select {
@@ -734,10 +766,12 @@ func (p *process) enqueueContext(ctx context.Context, message plugin.Message) er
 }
 
 func (p *process) finishWith(err error) {
+	shouldRestart := false
 	p.finish.Do(func() {
 		close(p.done)
 		p.out.close()
 		p.mu.Lock()
+		wasActive := p.status == plugin.StatusRunning || p.status == plugin.StatusStarting || p.status == plugin.StatusError
 		if p.stopRequested.Load() {
 			p.status, p.errText = plugin.StatusStopped, ""
 		} else if err != nil && p.status != plugin.StatusError {
@@ -745,13 +779,59 @@ func (p *process) finishWith(err error) {
 		} else if err == nil && (p.status == plugin.StatusRunning || p.status == plugin.StatusStarting) {
 			p.status = plugin.StatusStopped
 		}
+		restartEnabled := p.manifest.Restart == nil || *p.manifest.Restart
+		shouldRestart = wasActive && restartEnabled && !p.stopRequested.Load() && !p.host.closed.Load()
 		for id, waiter := range p.pending {
 			waiter <- plugin.Message{ID: id, Type: plugin.MessageResult, Error: errPluginStopped.Error()}
 			delete(p.pending, id)
 		}
 		p.mu.Unlock()
 		p.host.notifyStatus(p)
+		if shouldRestart && p.restartScheduled.CompareAndSwap(false, true) {
+			go p.host.scheduleRestart(p)
+		}
 	})
+}
+
+func (h *Host) scheduleRestart(old *process) {
+	old.mu.Lock()
+	old.restartAttempt++
+	attempt := old.restartAttempt
+	old.mu.Unlock()
+	delay := pluginRestartInitialDelay
+	for index := 1; index < attempt; index++ {
+		if delay >= pluginRestartMaxDelay/2 {
+			delay = pluginRestartMaxDelay
+			break
+		}
+		delay *= 2
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-h.watchStop:
+		return
+	}
+	if h.closed.Load() || old.stopRequested.Load() {
+		return
+	}
+	h.lifecycle.Lock()
+	defer h.lifecycle.Unlock()
+	current, err := h.processFor(old.manifest.ID)
+	if err != nil || current != old || h.closed.Load() || old.stopRequested.Load() {
+		return
+	}
+	manifest, err := readManifest(old.dir)
+	if err != nil || manifest.ID != old.manifest.ID {
+		if err != nil {
+			old.setError(err)
+		}
+		return
+	}
+	if err := h.replaceProcess(old.manifest.ID, old, manifest, old.dir); err != nil && h.log != nil {
+		h.log.Error("auto-restart plugin", "id", old.manifest.ID, "error", err)
+	}
 }
 
 func (p *process) setError(err error) {
@@ -803,10 +883,18 @@ func (p *process) addLog(level, message string) {
 }
 
 func truncate(value string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	value = strings.ToValidUTF8(value, "\uFFFD")
 	if len(value) <= maxBytes {
 		return value
 	}
-	return value[:maxBytes]
+	end := maxBytes
+	for end > 0 && !utf8.ValidString(value[:end]) {
+		end--
+	}
+	return value[:end]
 }
 
 func (p *process) info() plugin.Info {
@@ -1011,9 +1099,17 @@ func (h *Host) Emit(event plugin.Event) {
 		processes = append(processes, p)
 	}
 	h.mu.RUnlock()
-	data, err := json.Marshal(event.Data)
-	if err != nil {
-		data = json.RawMessage(fmt.Sprintf(`{"error":%q}`, err.Error()))
+	var data json.RawMessage
+	if event.Data != nil {
+		var err error
+		data, err = json.Marshal(event.Data)
+		if err != nil {
+			data = json.RawMessage(fmt.Sprintf(`{"error":%q}`, err.Error()))
+		}
+	}
+	eventTime := event.Time
+	if eventTime.IsZero() {
+		eventTime = time.Now()
 	}
 	delivered := make([]string, 0, len(processes))
 	for _, p := range processes {
@@ -1024,7 +1120,7 @@ func (h *Host) Emit(event plugin.Event) {
 		if !running || !matches {
 			continue
 		}
-		if p.enqueue(plugin.Message{Type: plugin.MessageEvent, Name: event.Name, InstanceID: event.InstanceID, Time: event.Time, Data: data}) {
+		if p.enqueue(plugin.Message{Type: plugin.MessageEvent, Name: event.Name, InstanceID: event.InstanceID, Time: &eventTime, Data: data}) {
 			p.sent.Add(1)
 			delivered = append(delivered, p.manifest.ID)
 		} else {
@@ -1043,6 +1139,7 @@ func (h *Host) List() []plugin.Info {
 	for _, p := range h.processes {
 		result = append(result, p.info())
 	}
+	sort.Slice(result, func(left, right int) bool { return result[left].Manifest.ID < result[right].Manifest.ID })
 	return result
 }
 
@@ -1108,13 +1205,27 @@ func normalizeSubscriptions(events []string) []string {
 
 func normalizeRuntimeSubscriptions(events []string) []string {
 	result := make([]string, 0, len(events))
+	seen := make(map[string]struct{}, len(events))
 	for _, event := range events {
 		event = strings.TrimSpace(event)
-		if event != "" {
-			result = append(result, event)
+		if event == "" {
+			continue
 		}
+		if _, exists := seen[event]; exists {
+			continue
+		}
+		seen[event] = struct{}{}
+		result = append(result, event)
 	}
 	return result
+}
+
+func validSubscriptionPattern(pattern string) bool {
+	if pattern == "" || pattern == "*" {
+		return pattern == "*"
+	}
+	wildcard := strings.IndexByte(pattern, '*')
+	return wildcard < 0 || wildcard == len(pattern)-1
 }
 
 func matchesEvent(subscriptions []string, event string) bool {
