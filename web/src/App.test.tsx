@@ -102,7 +102,17 @@ describe('Workspace quick commands', () => {
           activeDialog: null,
           localPlayer: { id: 7, health: 73.5, armour: 20 },
           vehicles: [
-            { id: 42, modelId: 411, distance: 0, health: 900, occupied: true, driverName: '', x: 0, y: 0, z: 0 },
+            {
+              id: 42,
+              modelId: 411,
+              distance: 0,
+              health: 900,
+              occupied: true,
+              driverName: '',
+              x: 0,
+              y: 0,
+              z: 0,
+            },
           ],
           vehicleState: { inVehicle: true, passenger: false, vehicleId: 42, health: 0, healthKnown: true },
         }}

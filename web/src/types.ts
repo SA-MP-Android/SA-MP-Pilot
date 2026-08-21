@@ -96,7 +96,13 @@ export interface Snapshot {
   commands: QuickCommand[]
   activeDialog: Dialog | null
   localPlayer: LocalPlayer
-  vehicleState: { inVehicle: boolean; passenger: boolean; vehicleId: number; health?: number; healthKnown?: boolean }
+  vehicleState: {
+    inVehicle: boolean
+    passenger: boolean
+    vehicleId: number
+    health?: number
+    healthKnown?: boolean
+  }
   keyMask: number
   afk: boolean
   spawned: boolean

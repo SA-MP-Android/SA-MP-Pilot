@@ -114,7 +114,11 @@ describe('api', () => {
       operations: [
         { op: 'replace', path: '/connection', value: { status: 'connected' } },
         { op: 'replace', path: '/localPlayer', value: { id: 7, health: 73.5, armour: 20 } },
-        { op: 'replace', path: '/vehicleState', value: { inVehicle: true, passenger: false, vehicleId: 42, health: 0, healthKnown: true } },
+        {
+          op: 'replace',
+          path: '/vehicleState',
+          value: { inVehicle: true, passenger: false, vehicleId: 42, health: 0, healthKnown: true },
+        },
         { op: 'replace', path: '/spawned', value: true },
         { op: 'replace', path: '/spawnReady', value: true },
       ],
