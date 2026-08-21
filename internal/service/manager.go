@@ -232,7 +232,7 @@ func (m *Manager) DeleteCommand(id, commandID string) error {
 	return nil
 }
 func newInstance(s domain.Server, syncEpoch string) *instance {
-	snapshot := domain.Snapshot{Revision: 1, SyncEpoch: syncEpoch, Server: s, Connection: domain.Connection{Status: domain.StatusDisconnected}, Chat: []domain.ChatMessage{}, Players: []domain.Player{}, NearbyPlayers: []domain.Player{}, Vehicles: []domain.Vehicle{}, Objects: []domain.Object{}, TextDraws: []domain.TextDraw{}, Dialogs: []domain.Dialog{}, Commands: []domain.QuickCommand{}, VehicleState: domain.VehicleState{VehicleID: domain.InvalidVehicleID}}
+	snapshot := domain.Snapshot{Revision: 1, SyncEpoch: syncEpoch, Server: s, Connection: domain.Connection{Status: domain.StatusDisconnected}, Chat: []domain.ChatMessage{}, Players: []domain.Player{}, NearbyPlayers: []domain.Player{}, Vehicles: []domain.Vehicle{}, Objects: []domain.Object{}, TextDraws: []domain.TextDraw{}, Dialogs: []domain.Dialog{}, Commands: []domain.QuickCommand{}, LocalPlayer: domain.LocalPlayer{ID: domain.InvalidPlayerID}, VehicleState: domain.VehicleState{VehicleID: domain.InvalidVehicleID}}
 	return &instance{snap: snapshot, published: cloneSnapshot(snapshot), playerID: domain.InvalidPlayerID, dirty: make(chan struct{}, 1)}
 }
 func (m *Manager) List() []domain.Snapshot {
@@ -439,8 +439,9 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 		case samp.EventJoined:
 			localPlayer := event.Data.(samp.PlayerEvent)
 			i.playerID = int(localPlayer.ID)
+			i.snap.LocalPlayer = domain.LocalPlayer{ID: i.playerID, Health: localPlayer.Health, Armour: localPlayer.Armour}
 			i.snap.SpawnReady = false
-			i.snap.Players = upsertPlayer(i.snap.Players, domain.Player{ID: int(localPlayer.ID), Name: s.Nickname})
+			i.snap.Players = upsertPlayer(i.snap.Players, domain.Player{ID: int(localPlayer.ID), Name: s.Nickname, Health: localPlayer.Health, Armour: localPlayer.Armour})
 			i.snap.Players = sortPlayers(i.snap.Players, i.playerID)
 			now := time.Now()
 			name := samp.DecodeServerText(string(s.Encoding), info.Hostname)
@@ -517,15 +518,29 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 		case samp.EventVehicleAdd:
 			v := event.Data.(samp.VehicleEvent)
 			i.snap.Vehicles = upsertVehicle(i.snap.Vehicles, domain.Vehicle{ID: int(v.ID), ModelID: int(v.ModelID), X: v.X, Y: v.Y, Z: v.Z, Health: v.Health, Distance: distance(i.position, [3]float32{v.X, v.Y, v.Z})})
+			if i.snap.VehicleState.InVehicle && i.snap.VehicleState.VehicleID == int(v.ID) {
+				i.snap.VehicleState.Health = v.Health
+				i.snap.VehicleState.HealthKnown = true
+			}
 			sortNearby(i)
 		case samp.EventVehicleRemove:
 			v := event.Data.(samp.VehicleEvent)
 			i.snap.Vehicles = removeVehicle(i.snap.Vehicles, int(v.ID))
+			if i.snap.VehicleState.InVehicle && i.snap.VehicleState.VehicleID == int(v.ID) {
+				i.snap.VehicleState.Health = 0
+				i.snap.VehicleState.HealthKnown = false
+			}
 		case samp.EventPlayerSync:
 			v := event.Data.(samp.PlayerEvent)
 			player := findPlayer(i.snap.Players, int(v.ID))
 			player.ID, player.X, player.Y, player.Z = int(v.ID), v.X, v.Y, v.Z
-			player.Health, player.Armour = v.Health, v.Armour
+			if int(v.ID) == i.playerID {
+				// Player sync health is quantized on the wire. Keep the local
+				// player's authoritative float values from health RPCs/spawn.
+				player.Health, player.Armour = i.snap.LocalPlayer.Health, i.snap.LocalPlayer.Armour
+			} else {
+				player.Health, player.Armour = v.Health, v.Armour
+			}
 			if v.HasSkin {
 				player.Skin = int(v.Skin)
 			}
@@ -562,15 +577,15 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 			publishSnapshot = false
 			markDirty(i)
 		case samp.EventVehicleState:
-			v := event.Data.(samp.VehicleStateEvent)
-			vehicleID := domain.InvalidVehicleID
-			if v.InVehicle {
-				vehicleID = int(v.VehicleID)
-			}
-			i.snap.VehicleState = domain.VehicleState{InVehicle: v.InVehicle, Passenger: v.Passenger, VehicleID: vehicleID}
+			applyVehicleState(i, event.Data.(samp.VehicleStateEvent))
+		case samp.EventPlayerHealth:
+			applyLocalPlayerHealth(i, event.Data.(samp.PlayerHealthEvent))
 		case samp.EventSpawned:
 			i.snap.Spawned = true
 			i.snap.SpawnReady = false
+			if v, ok := event.Data.(samp.SpawnedEvent); ok {
+				applyLocalPlayerHealth(i, samp.PlayerHealthEvent{Health: v.Health, Armour: v.Armour})
+			}
 		case samp.EventAppearance:
 			v := event.Data.(samp.PlayerEvent)
 			if int(v.ID) == i.playerID && v.HasPosition && v.HasSkin && v.HasTeam && v.HasRotation {
@@ -606,9 +621,22 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 			vehicle.Distance = distance(i.position, [3]float32{v.X, v.Y, v.Z})
 			vehicle.Occupied = true
 			i.snap.Vehicles = upsertVehicle(i.snap.Vehicles, vehicle)
+			if i.snap.VehicleState.InVehicle && i.snap.VehicleState.VehicleID == int(v.ID) {
+				i.snap.VehicleState.Health = v.Health
+				i.snap.VehicleState.HealthKnown = true
+			}
 			sortNearby(i)
 			publishSnapshot = false
 			markDirty(i)
+		case samp.EventVehicleHealth:
+			v := event.Data.(samp.VehicleHealthEvent)
+			vehicle := findVehicle(i.snap.Vehicles, int(v.ID))
+			vehicle.ID, vehicle.Health = int(v.ID), v.Health
+			i.snap.Vehicles = upsertVehicle(i.snap.Vehicles, vehicle)
+			if i.snap.VehicleState.InVehicle && i.snap.VehicleState.VehicleID == int(v.ID) {
+				i.snap.VehicleState.Health = v.Health
+				i.snap.VehicleState.HealthKnown = true
+			}
 		case samp.EventDisconnected:
 			if i.client == client {
 				i.client = nil
@@ -704,6 +732,40 @@ func removePlayerFromSnapshot(i *instance, id int) {
 	i.snap.Players = removePlayer(i.snap.Players, id)
 	i.snap.NearbyPlayers = removePlayer(i.snap.NearbyPlayers, id)
 }
+func applyLocalPlayerHealth(i *instance, value samp.PlayerHealthEvent) {
+	i.snap.LocalPlayer = domain.LocalPlayer{ID: i.playerID, Health: value.Health, Armour: value.Armour}
+	local := findPlayer(i.snap.Players, i.playerID)
+	local.ID, local.Health, local.Armour = i.playerID, value.Health, value.Armour
+	i.snap.Players = upsertPlayer(i.snap.Players, local)
+	i.snap.Players = sortPlayers(i.snap.Players, i.playerID)
+	updatePlayerHealth(i.snap.NearbyPlayers, i.playerID, value.Health, value.Armour)
+}
+func updatePlayerHealth(players []domain.Player, id int, health, armour float32) {
+	for index := range players {
+		if players[index].ID == id {
+			players[index].Health = health
+			players[index].Armour = armour
+			return
+		}
+	}
+}
+func applyVehicleState(i *instance, value samp.VehicleStateEvent) {
+	vehicleID := domain.InvalidVehicleID
+	health, healthKnown := float32(0), false
+	if value.InVehicle {
+		vehicleID = int(value.VehicleID)
+		health, healthKnown = value.Health, value.HasHealth
+		if !healthKnown {
+			if vehicle, ok := findVehicleByID(i.snap.Vehicles, vehicleID); ok {
+				health, healthKnown = vehicle.Health, true
+			}
+		}
+	}
+	i.snap.VehicleState = domain.VehicleState{
+		InVehicle: value.InVehicle, Passenger: value.Passenger, VehicleID: vehicleID,
+		Health: health, HealthKnown: healthKnown,
+	}
+}
 func resetConnectionState(i *instance) {
 	clear(i.snap.Players)
 	i.snap.Players = i.snap.Players[:0]
@@ -719,6 +781,7 @@ func resetConnectionState(i *instance) {
 	clear(i.snap.Dialogs)
 	i.snap.Dialogs = i.snap.Dialogs[:0]
 	i.snap.VehicleState = domain.VehicleState{VehicleID: domain.InvalidVehicleID}
+	i.snap.LocalPlayer = domain.LocalPlayer{ID: domain.InvalidPlayerID}
 	i.snap.KeyMask = 0
 	i.snap.AFK = false
 	i.snap.Spawned = false
@@ -821,12 +884,16 @@ func removeVehicle(v []domain.Vehicle, id int) []domain.Vehicle {
 	return out
 }
 func findVehicle(v []domain.Vehicle, id int) domain.Vehicle {
+	item, _ := findVehicleByID(v, id)
+	return item
+}
+func findVehicleByID(v []domain.Vehicle, id int) (domain.Vehicle, bool) {
 	for _, item := range v {
 		if item.ID == id {
-			return item
+			return item, true
 		}
 	}
-	return domain.Vehicle{ID: id}
+	return domain.Vehicle{ID: id}, false
 }
 func distance(a, b [3]float32) float32 {
 	dx, dy, dz := float64(a[0]-b[0]), float64(a[1]-b[1]), float64(a[2]-b[2])
@@ -1543,6 +1610,7 @@ func snapshotPatch(previous, current domain.Snapshot) []domain.PatchOperation {
 	add("/dialogs", previous.Dialogs, current.Dialogs)
 	add("/commands", previous.Commands, current.Commands)
 	add("/activeDialog", previous.ActiveDialog, current.ActiveDialog)
+	add("/localPlayer", previous.LocalPlayer, current.LocalPlayer)
 	add("/vehicleState", previous.VehicleState, current.VehicleState)
 	add("/keyMask", previous.KeyMask, current.KeyMask)
 	add("/afk", previous.AFK, current.AFK)
@@ -1578,8 +1646,16 @@ func (m *Manager) emitClientPluginEvent(instanceID string, event samp.Event) {
 	if sink == nil {
 		return
 	}
-	data := pluginEventData(event)
-	sink.Emit(plugin.Event{Name: clientPluginEventName(event), InstanceID: instanceID, Time: time.Now(), Data: data})
+	now := time.Now()
+	sink.Emit(plugin.Event{Name: clientPluginEventName(event), InstanceID: instanceID, Time: now, Data: pluginEventData(event)})
+	if event.Type == samp.EventSpawned {
+		if value, ok := event.Data.(samp.SpawnedEvent); ok {
+			sink.Emit(plugin.Event{
+				Name: plugin.EventClientPlayerHealth, InstanceID: instanceID, Time: now,
+				Data: plugin.PlayerHealthEventData{Health: value.Health, Armour: value.Armour},
+			})
+		}
+	}
 }
 
 func clientPluginEventName(event samp.Event) string {
@@ -1707,13 +1783,19 @@ func pluginEventData(event samp.Event) any {
 			data.Color = &color
 		}
 		return data
+	case samp.EventPlayerHealth:
+		value := event.Data.(samp.PlayerHealthEvent)
+		return plugin.PlayerHealthEventData{Health: value.Health, Armour: value.Armour}
 	case samp.EventVehicleState:
 		value := event.Data.(samp.VehicleStateEvent)
 		vehicleID := -1
 		if value.InVehicle {
 			vehicleID = int(value.VehicleID)
 		}
-		return plugin.VehicleStateEventData{InVehicle: value.InVehicle, Passenger: value.Passenger, VehicleID: vehicleID}
+		return plugin.VehicleStateEventData{InVehicle: value.InVehicle, Passenger: value.Passenger, VehicleID: vehicleID, Health: value.Health, HealthKnown: value.HasHealth}
+	case samp.EventVehicleHealth:
+		value := event.Data.(samp.VehicleHealthEvent)
+		return plugin.VehicleHealthEventData{ID: int(value.ID), Health: value.Health}
 	case samp.EventMovement:
 		value := event.Data.(samp.MotionEvent)
 		return plugin.MovementEventData{

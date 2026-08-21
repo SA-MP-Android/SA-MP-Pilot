@@ -61,8 +61,11 @@ export default {
     awaitingSpawn: 'Awaiting Spawn',
     passenger: 'Passenger',
     driver: 'Driver',
-    vehicle: 'Vehicle #{{id}}',
-    onFoot: 'On Foot',
+		vehicle: 'Vehicle #{{id}}',
+		onFoot: 'On Foot',
+		health: 'HP',
+		armour: 'Armour',
+		vehicleHealth: 'Vehicle HP',
   },
   players: {
     player: 'Player',

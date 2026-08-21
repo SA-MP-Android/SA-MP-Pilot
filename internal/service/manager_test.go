@@ -127,6 +127,65 @@ func TestResetConnectionStateClearsTransientInstanceData(t *testing.T) {
 	}
 }
 
+func TestApplyLocalPlayerHealthUpdatesCanonicalAndNearbyState(t *testing.T) {
+	i := &instance{
+		playerID: 7,
+		snap: domain.Snapshot{
+			Players:       []domain.Player{{ID: 7, Name: "pilot"}},
+			NearbyPlayers: []domain.Player{{ID: 7, Name: "pilot", Health: 100, Armour: 0}},
+		},
+	}
+	applyLocalPlayerHealth(i, samp.PlayerHealthEvent{Health: 61.5, Armour: 20})
+
+	if i.snap.LocalPlayer.ID != 7 || i.snap.LocalPlayer.Health != 61.5 || i.snap.LocalPlayer.Armour != 20 {
+		t.Fatalf("local player = %+v", i.snap.LocalPlayer)
+	}
+	if player := findPlayer(i.snap.Players, 7); player.Health != 61.5 || player.Armour != 20 || player.Name != "pilot" {
+		t.Fatalf("players local entry = %+v", player)
+	}
+	if player := findPlayer(i.snap.NearbyPlayers, 7); player.Health != 61.5 || player.Armour != 20 {
+		t.Fatalf("nearby local entry = %+v", player)
+	}
+}
+
+func TestApplyVehicleStatePreservesKnownZeroHealth(t *testing.T) {
+	i := &instance{snap: domain.Snapshot{Vehicles: []domain.Vehicle{{ID: 42, Health: 900}}}}
+	applyVehicleState(i, samp.VehicleStateEvent{InVehicle: true, VehicleID: 42, Health: 0, HasHealth: true})
+	if !i.snap.VehicleState.HealthKnown || i.snap.VehicleState.Health != 0 {
+		t.Fatalf("known zero vehicle state = %+v", i.snap.VehicleState)
+	}
+
+	applyVehicleState(i, samp.VehicleStateEvent{InVehicle: true, VehicleID: 42})
+	if !i.snap.VehicleState.HealthKnown || i.snap.VehicleState.Health != 900 {
+		t.Fatalf("fallback vehicle state = %+v", i.snap.VehicleState)
+	}
+}
+
+type recordingPluginSink struct {
+	events []plugin.Event
+}
+
+func (s *recordingPluginSink) Emit(event plugin.Event) {
+	s.events = append(s.events, event)
+}
+
+func TestSpawnedEventPublishesResetHealthToPlugins(t *testing.T) {
+	m := newManager(t)
+	sink := &recordingPluginSink{}
+	m.SetPluginSink(sink)
+	m.emitClientPluginEvent("instance-1", samp.Event{Type: samp.EventSpawned, Data: samp.SpawnedEvent{Health: 100, Armour: 0}})
+
+	if len(sink.events) != 2 {
+		t.Fatalf("plugin events = %+v", sink.events)
+	}
+	if sink.events[0].Name != plugin.EventClientSpawned {
+		t.Fatalf("spawn event = %+v", sink.events[0])
+	}
+	if sink.events[1].Name != plugin.EventClientPlayerHealth || sink.events[1].Data.(plugin.PlayerHealthEventData).Health != 100 {
+		t.Fatalf("spawn health event = %+v", sink.events[1])
+	}
+}
+
 func TestRawDialogListInputPreservesServerEncodingAndTableOrder(t *testing.T) {
 	dialog := &domain.Dialog{
 		Style:      dialogStyleTabListHeaders,
@@ -218,6 +277,33 @@ func TestPluginClientEventsUseStableCamelCasePayloads(t *testing.T) {
 	}
 	if got := string(encoded); got != `{"taskId":7,"kind":"walk","state":"started","x":1,"y":2,"z":3,"targetX":4,"targetY":5,"targetZ":6,"progress":0}` {
 		t.Fatalf("movement plugin payload = %s", got)
+	}
+
+	healthEvent := samp.Event{Type: samp.EventPlayerHealth, Data: samp.PlayerHealthEvent{Health: 61.5, Armour: 20}}
+	encoded, err = json.Marshal(pluginEventData(healthEvent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(encoded); got != `{"health":61.5,"armour":20}` {
+		t.Fatalf("player health plugin payload = %s", got)
+	}
+
+	vehicleEvent := samp.Event{Type: samp.EventVehicleHealth, Data: samp.VehicleHealthEvent{ID: 7, Health: 845}}
+	encoded, err = json.Marshal(pluginEventData(vehicleEvent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(encoded); got != `{"id":7,"health":845}` {
+		t.Fatalf("vehicle health plugin payload = %s", got)
+	}
+
+	vehicleState := samp.Event{Type: samp.EventVehicleState, Data: samp.VehicleStateEvent{InVehicle: true, VehicleID: 7, Health: 0, HasHealth: true}}
+	encoded, err = json.Marshal(pluginEventData(vehicleState))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(encoded); got != `{"inVehicle":true,"passenger":false,"vehicleId":7,"health":0,"healthKnown":true}` {
+		t.Fatalf("vehicle state plugin payload = %s", got)
 	}
 }
 

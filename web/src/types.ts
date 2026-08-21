@@ -76,6 +76,11 @@ export interface QuickCommand {
   label: string
   command: string
 }
+export interface LocalPlayer {
+  id: number
+  health: number
+  armour: number
+}
 export interface Snapshot {
   revision: number
   syncEpoch: string
@@ -90,7 +95,8 @@ export interface Snapshot {
   dialogs: Dialog[]
   commands: QuickCommand[]
   activeDialog: Dialog | null
-  vehicleState: { inVehicle: boolean; passenger: boolean; vehicleId: number }
+  localPlayer: LocalPlayer
+  vehicleState: { inVehicle: boolean; passenger: boolean; vehicleId: number; health?: number; healthKnown?: boolean }
   keyMask: number
   afk: boolean
   spawned: boolean
@@ -107,6 +113,7 @@ export type SnapshotPath =
   | '/dialogs'
   | '/commands'
   | '/activeDialog'
+  | '/localPlayer'
   | '/vehicleState'
   | '/keyMask'
   | '/afk'

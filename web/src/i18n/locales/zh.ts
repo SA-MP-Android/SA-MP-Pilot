@@ -60,8 +60,11 @@ export default {
     awaitingSpawn: '等待生成',
     passenger: '乘客',
     driver: '驾驶员',
-    vehicle: '车辆 #{{id}}',
-    onFoot: '步行',
+		vehicle: '车辆 #{{id}}',
+		onFoot: '步行',
+		health: '生命',
+		armour: '护甲',
+		vehicleHealth: '车辆血量',
   },
   players: {
     player: '玩家',

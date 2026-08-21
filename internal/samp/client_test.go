@@ -216,6 +216,101 @@ func TestSetPlayerDrunkLevelEmulatesSixtyFramesPerSecond(t *testing.T) {
 	}
 }
 
+func TestHealthRPCsUpdateLocalStateAndEmitEvents(t *testing.T) {
+	c := &Client{health: 100, armour: 0}
+	healthPayload := raknet.Writer{}
+	healthPayload.Float32(73.5)
+	event, err := c.decodeRPC(raknet.RPC{ID: RPCSetPlayerHealth, Payload: healthPayload.Bytes(), PayloadBits: healthPayload.LenBits()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event == nil || event.Type != EventPlayerHealth {
+		t.Fatalf("health event = %+v", event)
+	}
+	health := event.Data.(PlayerHealthEvent)
+	if health.Health != 73.5 || health.Armour != 0 || c.health != 73.5 {
+		t.Fatalf("health state = %+v, client health = %v", health, c.health)
+	}
+
+	armourPayload := raknet.Writer{}
+	armourPayload.Float32(25.25)
+	event, err = c.decodeRPC(raknet.RPC{ID: RPCSetPlayerArmour, Payload: armourPayload.Bytes(), PayloadBits: armourPayload.LenBits()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	armour := event.Data.(PlayerHealthEvent)
+	if armour.Health != 73.5 || armour.Armour != 25.25 || c.armour != 25.25 {
+		t.Fatalf("armour state = %+v, client armour = %v", armour, c.armour)
+	}
+}
+
+func TestVehicleHealthRPCsUpdateStreamedAndCurrentVehicle(t *testing.T) {
+	c := &Client{
+		vehicles:  map[uint16]VehicleEvent{7: {ID: 7, ModelID: 411, X: 1, Health: 1000}},
+		inVehicle: true,
+		vehicleID: 7,
+	}
+	payload := raknet.Writer{}
+	payload.Uint16(7)
+	payload.Float32(642.5)
+	event, err := c.decodeRPC(raknet.RPC{ID: RPCSetVehicleHealth, Payload: payload.Bytes(), PayloadBits: payload.LenBits()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event == nil || event.Type != EventVehicleHealth {
+		t.Fatalf("vehicle health event = %+v", event)
+	}
+	if got := c.vehicles[7].Health; got != 642.5 || c.vehicleHealth != 642.5 {
+		t.Fatalf("vehicle health = %v, current health = %v", got, c.vehicleHealth)
+	}
+
+	death := raknet.Writer{}
+	death.Uint16(7)
+	event, err = c.decodeRPC(raknet.RPC{ID: RPCVehicleDeath, Payload: death.Bytes(), PayloadBits: death.LenBits()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Data.(VehicleHealthEvent).Health != 0 || c.vehicles[7].Health != 0 || c.vehicleHealth != 0 {
+		t.Fatalf("vehicle death did not clear health: event=%+v vehicle=%+v current=%v", event, c.vehicles[7], c.vehicleHealth)
+	}
+	if !c.vehicleHealthKnown {
+		t.Fatal("vehicle death must keep the current vehicle health marked as known")
+	}
+}
+
+func TestMarkSpawnedResetsLocalHealth(t *testing.T) {
+	c := &Client{health: 0, armour: 55, spawned: false}
+	event := c.markSpawned()
+	if !c.spawned || c.health != defaultPlayerHealthValue || c.armour != 0 {
+		t.Fatalf("spawn state = spawned:%v health:%v armour:%v", c.spawned, c.health, c.armour)
+	}
+	if event.Health != defaultPlayerHealthValue || event.Armour != 0 {
+		t.Fatalf("spawn event = %+v", event)
+	}
+
+	c = &Client{health: 72.5, armour: 18, spawned: false}
+	event = c.markSpawned()
+	if event.Health != 72.5 || event.Armour != 18 {
+		t.Fatalf("server-provided spawn state was overwritten: %+v", event)
+	}
+}
+
+func TestSyncHealthByteClampsRPCHealthToWireRange(t *testing.T) {
+	for _, test := range []struct {
+		value float32
+		want  uint8
+	}{
+		{value: -1, want: 0},
+		{value: 73.5, want: 74},
+		{value: 255, want: 255},
+		{value: 500, want: 255},
+	} {
+		if got := syncHealthByte(test.value); got != test.want {
+			t.Errorf("syncHealthByte(%v) = %d, want %d", test.value, got, test.want)
+		}
+	}
+}
+
 func TestDrunkLevelDoesNotUnderflow(t *testing.T) {
 	c := &Client{drunkLevel: 30, drunkLevelSet: true}
 	level, active := c.advanceDrunkLevel(targetFramesPerSecond)
@@ -315,6 +410,9 @@ func TestDecodePutPlayerInVehicle(t *testing.T) {
 	if !state.InVehicle || !state.Passenger || state.VehicleID != 42 {
 		t.Fatalf("vehicle state = %+v", state)
 	}
+	if state.HasHealth {
+		t.Fatal("vehicle state without streamed data must not claim known health")
+	}
 }
 
 func TestSetVehicleStateUsesStreamedVehicleTransform(t *testing.T) {
@@ -332,6 +430,24 @@ func TestSetVehicleStateUsesStreamedVehicleTransform(t *testing.T) {
 	}
 	if c.vehicleHealth != 875 || c.vehicleQuaternion != yawQuaternion(90) {
 		t.Fatalf("vehicle transform = health %v quaternion %v", c.vehicleHealth, c.vehicleQuaternion)
+	}
+	state := c.vehicleStateEvent(42, false)
+	if !state.HasHealth || state.Health != 875 {
+		t.Fatalf("vehicle state health = %+v", state)
+	}
+}
+
+func TestVehicleStateDistinguishesExplicitZeroFromUnknownHealth(t *testing.T) {
+	unknown := &Client{}
+	unknown.setVehicleState(42, 0)
+	if state := unknown.vehicleStateEvent(42, false); state.HasHealth {
+		t.Fatalf("unknown vehicle state = %+v", state)
+	}
+
+	knownZero := &Client{vehicles: map[uint16]VehicleEvent{42: {ID: 42, Health: 0}}}
+	knownZero.setVehicleState(42, 0)
+	if state := knownZero.vehicleStateEvent(42, false); !state.HasHealth || state.Health != 0 {
+		t.Fatalf("known zero vehicle state = %+v", state)
 	}
 }
 

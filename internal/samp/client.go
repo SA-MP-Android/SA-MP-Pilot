@@ -31,9 +31,11 @@ const (
 	RPCSetSpawnInfo        uint8  = 68
 	RPCSetPlayerPos        uint8  = 12
 	RPCSetPlayerPosFindZ   uint8  = 13
+	RPCSetPlayerHealth     uint8  = 14
 	RPCSetPlayerSkin       uint8  = 153
 	RPCSetPlayerTeam       uint8  = 69
 	RPCSetFacingAngle      uint8  = 19
+	RPCSetPlayerArmour     uint8  = 66
 	RPCPutPlayerInVehicle  uint8  = 70
 	RPCRemoveFromVehicle   uint8  = 71
 	RPCSetPlayerColor      uint8  = 72
@@ -59,6 +61,8 @@ const (
 	RPCDestroyObject       uint8  = 47
 	RPCWorldVehicleAdd     uint8  = 164
 	RPCWorldVehicleRemove  uint8  = 165
+	RPCVehicleDeath        uint8  = 136
+	RPCSetVehicleHealth    uint8  = 147
 	packetPlayerSync       uint8  = 207
 	packetVehicleSync      uint8  = 200
 	packetPassengerSync    uint8  = 211
@@ -87,6 +91,7 @@ const (
 	defaultPlayerMoney              int32   = 0
 	gameHandshakeTimeout                    = 15 * time.Second
 	defaultPlayerHealth             uint8   = 100
+	defaultPlayerHealthValue        float32 = float32(defaultPlayerHealth)
 	clientCheckMemoryType           uint8   = 0x48
 	serverForcedSpawnOutcome        uint8   = 2
 	initialClassIndex               uint32  = 0
@@ -163,6 +168,8 @@ const (
 	EventPosition      EventType = "position"
 	EventAppearance    EventType = "appearance"
 	EventVehicleState  EventType = "vehicle.state"
+	EventPlayerHealth  EventType = "player.health"
+	EventVehicleHealth EventType = "vehicle.health"
 	EventSpawned       EventType = "spawned"
 	EventVehicleSync   EventType = "vehicle.sync"
 	EventMovement      EventType = "movement"
@@ -223,6 +230,20 @@ type VehicleStateEvent struct {
 	InVehicle bool
 	Passenger bool
 	VehicleID uint16
+	Health    float32
+	HasHealth bool
+}
+type SpawnedEvent struct {
+	Health float32
+	Armour float32
+}
+type PlayerHealthEvent struct {
+	Health float32
+	Armour float32
+}
+type VehicleHealthEvent struct {
+	ID     uint16
+	Health float32
 }
 type Client struct {
 	conn                  *raknet.Conn
@@ -240,6 +261,9 @@ type Client struct {
 	inVehicle             bool
 	passenger             bool
 	vehicleSeat           uint8
+	health                float32
+	armour                float32
+	vehicleHealthKnown    bool
 	spawned               bool
 	localID               uint16
 	skin                  int32
@@ -316,6 +340,7 @@ func DialClientWithOptions(ctx context.Context, address, nickname, password, cha
 		emulatePCClientCheck: options.EmulatePCClientCheck,
 		clientCheckStart:     clientCheckStart,
 		vehicles:             make(map[uint16]VehicleEvent),
+		health:               defaultPlayerHealthValue,
 	}
 	handshakeCtx, handshakeCancel := context.WithTimeout(ctx, gameHandshakeTimeout)
 	defer handshakeCancel()
@@ -622,7 +647,7 @@ func (c *Client) EnterVehicle(ctx context.Context, vehicleID uint16, passenger b
 		}
 		c.setVehicleState(vehicleID, seatID)
 		c.syncMu.Unlock()
-		c.emit(Event{Type: EventVehicleState, Data: VehicleStateEvent{InVehicle: true, Passenger: passenger, VehicleID: vehicleID}})
+		c.emit(Event{Type: EventVehicleState, Data: c.vehicleStateEvent(vehicleID, passenger)})
 		return nil
 	}
 	c.syncMu.Unlock()
@@ -666,7 +691,7 @@ func (c *Client) EnterVehicle(ctx context.Context, vehicleID uint16, passenger b
 		seatID = 1
 	}
 	c.setVehicleState(vehicleID, seatID)
-	c.emit(Event{Type: EventVehicleState, Data: VehicleStateEvent{InVehicle: true, Passenger: passenger, VehicleID: vehicleID}})
+	c.emit(Event{Type: EventVehicleState, Data: c.vehicleStateEvent(vehicleID, passenger)})
 	return nil
 }
 
@@ -852,7 +877,7 @@ func (c *Client) sendOnFoot(ctx context.Context) error {
 		lrAnalog: c.onFootLRAnalog, udAnalog: c.onFootUDAnalog,
 		keys:     c.onFootProtocolKeys | protocolKeys(c.keyMask),
 		position: c.position, quaternion: c.onFootQuaternion,
-		health: defaultPlayerHealth, weapon: c.onFootWeapon | protocolAdditionalKey(c.keyMask)<<6,
+		health: syncHealthByte(c.health), armour: syncHealthByte(c.armour), weapon: c.onFootWeapon | protocolAdditionalKey(c.keyMask)<<6,
 		specialAction: c.onFootSpecialAction, velocity: c.onFootVelocity,
 		animationID: c.onFootAnimationID, animationFlags: c.onFootAnimationFlags,
 	}
@@ -886,20 +911,20 @@ func (c *Client) sendVehicle(ctx context.Context, passenger bool) error {
 		}
 	}
 	vehicleHealth := c.vehicleHealth
-	if vehicleHealth == 0 {
-		vehicleHealth = vehicle.Health
-		if vehicleHealth == 0 {
-			vehicleHealth = 1000
-		}
+	if vehicleHealth == 0 && !vehicleKnown {
+		// A direct entry can start before the vehicle has been streamed. Use the
+		// GTA default only when there is no authoritative vehicle health yet;
+		// zero from a health RPC/death update must remain zero on the wire.
+		vehicleHealth = 1000
 	}
 	vehicleFrame := vehicleFrame{
 		vehicleID: vehicleID, lrAnalog: c.vehicleLRAnalog, udAnalog: c.vehicleUDAnalog,
 		keys: c.vehicleProtocolKeys | protocolVehicleKeys(mask), quaternion: vehicleQuaternion,
 		position: position, velocity: c.vehicleVelocity, vehicleHealth: vehicleHealth,
-		playerHealth: defaultPlayerHealth, landingGear: 1,
+		playerHealth: syncHealthByte(c.health), playerArmour: syncHealthByte(c.armour), landingGear: 1,
 	}
 	passengerFrame := passengerFrame{
-		vehicleID: vehicleID, seatID: vehicleSeat, playerHealth: defaultPlayerHealth,
+		vehicleID: vehicleID, seatID: vehicleSeat, playerHealth: syncHealthByte(c.health), playerArmour: syncHealthByte(c.armour),
 		additionalKey: protocolAdditionalKey(mask), weapon: c.onFootWeapon,
 		lrAnalog: c.vehicleLRAnalog, udAnalog: c.vehicleUDAnalog,
 		keys: c.vehicleProtocolKeys | protocolVehicleKeys(mask), position: position,
@@ -1099,6 +1124,10 @@ func (c *Client) observeVehicleSync(vehicle VehicleEvent) {
 		vehicle.Angle = previous.Angle
 	}
 	c.vehicles[vehicle.ID] = vehicle
+	if c.inVehicle && c.vehicleID == vehicle.ID {
+		c.vehicleHealth = vehicle.Health
+		c.vehicleHealthKnown = true
+	}
 	c.stateMu.Unlock()
 }
 
@@ -1222,6 +1251,83 @@ func syncNibble(value uint8) float32 {
 		return float32(value * 7)
 	}
 }
+
+// GTA's on-foot and in-car sync packets carry health and armour as bytes,
+// while the server RPCs use floats. Keep the full float in client state and
+// clamp only at the wire boundary, matching the game's HUD/sync range.
+func syncHealthByte(value float32) uint8 {
+	if value <= 0 || math.IsNaN(float64(value)) {
+		return 0
+	}
+	if value >= 255 || math.IsInf(float64(value), 1) {
+		return 255
+	}
+	return uint8(math.Round(float64(value)))
+}
+
+func readHealth(r *raknet.Reader) (float32, error) {
+	value, err := r.Float32()
+	if err != nil {
+		return 0, err
+	}
+	if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+		return 0, ErrMalformedPacket
+	}
+	return value, nil
+}
+
+func (c *Client) playerHealthEvent() PlayerHealthEvent {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return PlayerHealthEvent{Health: c.health, Armour: c.armour}
+}
+
+func (c *Client) setPlayerHealth(health float32) PlayerHealthEvent {
+	c.stateMu.Lock()
+	c.health = health
+	event := PlayerHealthEvent{Health: c.health, Armour: c.armour}
+	c.stateMu.Unlock()
+	return event
+}
+
+func (c *Client) setPlayerArmour(armour float32) PlayerHealthEvent {
+	c.stateMu.Lock()
+	c.armour = armour
+	event := PlayerHealthEvent{Health: c.health, Armour: c.armour}
+	c.stateMu.Unlock()
+	return event
+}
+
+func (c *Client) setVehicleHealth(vehicleID uint16, health float32) {
+	c.stateMu.Lock()
+	if c.vehicles == nil {
+		c.vehicles = make(map[uint16]VehicleEvent)
+	}
+	vehicle := c.vehicles[vehicleID]
+	vehicle.ID = vehicleID
+	vehicle.Health = health
+	c.vehicles[vehicleID] = vehicle
+	if c.inVehicle && c.vehicleID == vehicleID {
+		c.vehicleHealth = health
+		c.vehicleHealthKnown = true
+	}
+	c.stateMu.Unlock()
+}
+
+func (c *Client) vehicleStateEvent(vehicleID uint16, passenger bool) VehicleStateEvent {
+	c.stateMu.RLock()
+	health := float32(0)
+	hasHealth := false
+	if c.inVehicle && c.vehicleID == vehicleID {
+		health = c.vehicleHealth
+		hasHealth = c.vehicleHealthKnown
+	} else if vehicle, ok := c.vehicles[vehicleID]; ok {
+		health = vehicle.Health
+		hasHealth = true
+	}
+	c.stateMu.RUnlock()
+	return VehicleStateEvent{InVehicle: true, Passenger: passenger, VehicleID: vehicleID, Health: health, HasHealth: hasHealth}
+}
 func (c *Client) handleAuth(packet []byte) error {
 	if len(packet) < 2 || int(packet[1])+2 > len(packet) {
 		return ErrMalformedPacket
@@ -1245,12 +1351,15 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 		}
 		c.stateMu.Lock()
 		c.localID = localPlayerID
+		c.health = defaultPlayerHealthValue
+		c.armour = 0
 		c.initObserved = false
 		c.spawnRequested = false
 		c.spawnInfoReady = false
 		c.stateMu.Unlock()
 		go c.requestInitialClassFallback()
-		return &Event{Type: EventJoined, Data: PlayerEvent{ID: localPlayerID}}, nil
+		health := c.playerHealthEvent()
+		return &Event{Type: EventJoined, Data: PlayerEvent{ID: localPlayerID, Health: health.Health, Armour: health.Armour}}, nil
 	case RPCRequestClass:
 		outcome, e := r.Uint8()
 		if e != nil {
@@ -1284,14 +1393,12 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 			if e = c.sendRPC(c.ctx, RPCSpawn, &spawn, raknet.ReliableOrdered); e != nil {
 				return nil, e
 			}
-			c.setSpawned(true)
+			spawned := c.markSpawned()
+			return &Event{Type: EventSpawned, Data: spawned}, nil
 		} else if outcome == 0 {
 			c.stateMu.Lock()
 			c.spawnRequested = false
 			c.stateMu.Unlock()
-		}
-		if spawnApproved {
-			return &Event{Type: EventSpawned}, nil
 		}
 		return nil, nil
 	case RPCSetSpawnInfo:
@@ -1313,6 +1420,18 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 		}
 		c.setDrunkLevel(level)
 		return nil, nil
+	case RPCSetPlayerHealth:
+		health, e := readHealth(r)
+		if e != nil {
+			return nil, e
+		}
+		return &Event{Type: EventPlayerHealth, Data: c.setPlayerHealth(health)}, nil
+	case RPCSetPlayerArmour:
+		armour, e := readHealth(r)
+		if e != nil {
+			return nil, e
+		}
+		return &Event{Type: EventPlayerHealth, Data: c.setPlayerArmour(armour)}, nil
 	case RPCSetPlayerPos, RPCSetPlayerPosFindZ:
 		c.observeServerInitialization()
 		c.StopMovement()
@@ -1337,7 +1456,7 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 		}
 		passenger := seatID != 0
 		c.setVehicleState(vehicleID, seatID)
-		return &Event{Type: EventVehicleState, Data: VehicleStateEvent{InVehicle: true, Passenger: passenger, VehicleID: vehicleID}}, nil
+		return &Event{Type: EventVehicleState, Data: c.vehicleStateEvent(vehicleID, passenger)}, nil
 	case RPCRemoveFromVehicle:
 		c.clearVehicleState()
 		return &Event{Type: EventVehicleState, Data: VehicleStateEvent{}}, nil
@@ -1530,6 +1649,10 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 			c.vehicles = make(map[uint16]VehicleEvent)
 		}
 		c.vehicles[v.ID] = v
+		if c.inVehicle && c.vehicleID == v.ID {
+			c.vehicleHealth = v.Health
+			c.vehicleHealthKnown = true
+		}
 		c.stateMu.Unlock()
 		return &Event{Type: EventVehicleAdd, Data: v}, nil
 	case RPCWorldVehicleRemove:
@@ -1539,8 +1662,30 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 		}
 		c.stateMu.Lock()
 		delete(c.vehicles, id)
+		if c.inVehicle && c.vehicleID == id {
+			c.vehicleHealth = 0
+			c.vehicleHealthKnown = false
+		}
 		c.stateMu.Unlock()
 		return &Event{Type: EventVehicleRemove, Data: VehicleEvent{ID: id}}, nil
+	case RPCSetVehicleHealth:
+		vehicleID, e := r.Uint16()
+		if e != nil {
+			return nil, e
+		}
+		health, e := readHealth(r)
+		if e != nil {
+			return nil, e
+		}
+		c.setVehicleHealth(vehicleID, health)
+		return &Event{Type: EventVehicleHealth, Data: VehicleHealthEvent{ID: vehicleID, Health: health}}, nil
+	case RPCVehicleDeath:
+		vehicleID, e := r.Uint16()
+		if e != nil {
+			return nil, e
+		}
+		c.setVehicleHealth(vehicleID, 0)
+		return &Event{Type: EventVehicleHealth, Data: VehicleHealthEvent{ID: vehicleID, Health: 0}}, nil
 	}
 	return nil, nil
 }
@@ -1680,6 +1825,7 @@ func (c *Client) setVehicleState(vehicleID uint16, seatID uint8) {
 	c.enterQueued = false
 	c.enterQueuedMode = ""
 	c.vehicleHealth = 0
+	c.vehicleHealthKnown = false
 	c.vehicleQuaternion = [4]float32{}
 	if vehicle, ok := c.vehicles[vehicleID]; ok {
 		// PutPlayerInVehicle does not carry a position. The normal game client
@@ -1687,6 +1833,7 @@ func (c *Client) setVehicleState(vehicleID uint16, seatID uint8) {
 		// in-car sync, so use the same authoritative vehicle transform here.
 		c.position = [3]float32{vehicle.X, vehicle.Y, vehicle.Z}
 		c.vehicleHealth = vehicle.Health
+		c.vehicleHealthKnown = true
 		c.vehicleQuaternion = yawQuaternion(vehicle.Angle)
 	}
 	c.stateMu.Unlock()
@@ -1709,6 +1856,7 @@ func (c *Client) clearVehicleState() {
 	c.vehicleQuaternion = [4]float32{}
 	c.vehicleLRAnalog, c.vehicleUDAnalog, c.vehicleProtocolKeys = 0, 0, 0
 	c.vehicleHealth = 0
+	c.vehicleHealthKnown = false
 	if c.enterQueued {
 		queuedVehicle = c.enterQueuedVehicle
 		queuedPassenger = c.enterQueuedPassenger
@@ -1735,7 +1883,26 @@ func (c *Client) setSpawnInfo(info SpawnInfo) {
 func (c *Client) setSpawned(spawned bool) {
 	c.stateMu.Lock()
 	c.spawned = spawned
+	if !spawned {
+		c.vehicleHealthKnown = false
+	}
 	c.stateMu.Unlock()
+}
+
+func (c *Client) markSpawned() SpawnedEvent {
+	c.stateMu.Lock()
+	// SpawnInfo carries team, skin, transform, weapons and ammunition, but no
+	// health or armour. A dead local client needs a default baseline for its
+	// first sync; preserve a positive server-provided value if it arrived before
+	// the spawn acknowledgement, and let later health RPCs remain authoritative.
+	if c.health <= 0 || math.IsNaN(float64(c.health)) || math.IsInf(float64(c.health), 0) {
+		c.health = defaultPlayerHealthValue
+		c.armour = 0
+	}
+	c.spawned = true
+	event := SpawnedEvent{Health: c.health, Armour: c.armour}
+	c.stateMu.Unlock()
+	return event
 }
 
 func (c *Client) observeServerInitialization() {

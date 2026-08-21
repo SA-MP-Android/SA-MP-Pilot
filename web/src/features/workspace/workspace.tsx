@@ -102,6 +102,12 @@ export function Workspace({
       : value.vehicleState.inVehicle
         ? `${t(value.vehicleState.passenger ? 'status.passenger' : 'status.driver')} · ${t('status.vehicle', { id: value.vehicleState.vehicleId })}`
         : t('status.onFoot')
+  const localPlayer = value.localPlayer
+  const currentVehicle = value.vehicleState.inVehicle
+    ? value.vehicles.find((vehicle) => vehicle.id === value.vehicleState.vehicleId)
+    : undefined
+  const currentVehicleHealth =
+    value.vehicleState.healthKnown === false ? undefined : value.vehicleState.health ?? currentVehicle?.health
 
   const playerTable = (
     <div className="rounded-lg border">
@@ -184,6 +190,16 @@ export function Workspace({
           </Badge>
         )}
         {connection.status === STATUS_CONNECTED && <Badge variant="secondary">{stateLabel}</Badge>}
+        {connection.status === STATUS_CONNECTED && localPlayer && localPlayer.id >= 0 && (
+          <Badge variant="outline">
+            {t('status.health')} {Math.round(localPlayer.health)} · {t('status.armour')} {Math.round(localPlayer.armour)}
+          </Badge>
+        )}
+        {connection.status === STATUS_CONNECTED && value.vehicleState.inVehicle && currentVehicleHealth !== undefined && (
+          <Badge variant="outline">
+            {t('status.vehicleHealth')} {Math.round(currentVehicleHealth)}
+          </Badge>
+        )}
         <div className="flex w-full flex-wrap gap-2 sm:ml-auto sm:w-auto sm:flex-nowrap">
           {connection.status === STATUS_CONNECTED && value.spawnReady && !value.spawned && (
             <Button variant="secondary" onClick={() => act(ACTION_SPAWN)}>

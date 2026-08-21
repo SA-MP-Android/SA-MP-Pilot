@@ -108,6 +108,8 @@ Every event delivered to a plugin has this shape:
 
 `instance.updated` operations currently replace top-level snapshot paths. A plugin should use `instance.getSnapshot()` as its recovery source when it misses events or does not want to implement patch application.
 
+Snapshots expose the local player's state as `localPlayer: { id, health, armour }`. When the client is driving or riding, `vehicleState` also includes the current vehicle's `health` and `healthKnown`; only use `health` when `healthKnown` is true. The matching entry in `vehicles` remains the complete vehicle record.
+
 ## Client events
 
 All client payloads use camelCase. IDs inside entity payloads are named `id`; `playerId` is used only where the value specifically identifies a player in another object.
@@ -132,7 +134,9 @@ All client payloads use camelCase. IDs inside entity payloads are named `id`; `p
 | `client.player.sync` | `{ id, x, y, z, health, armour, skin, team, rotation, color? }` |
 | `client.position` | `{ x, y, z }` |
 | `client.appearance` | `{ id, x?, y?, z?, skin?, team?, rotation?, color? }`; only fields present in the server update are included |
-| `client.vehicle.state` | `{ inVehicle, passenger, vehicleId }`; `vehicleId` is `-1` when not in a vehicle |
+| `client.player.health` | `{ health, armour }`; emitted when the server updates the local player's health or armour, and when a successful spawn resets the local state to the default values |
+| `client.vehicle.state` | `{ inVehicle, passenger, vehicleId, health, healthKnown }`; `vehicleId` is `-1` when not in a vehicle and `healthKnown` is false when the current vehicle's health is not known yet |
+| `client.vehicle.health` | `{ id, health }`; emitted for `SetVehicleHealth` and vehicle-death updates |
 | `client.spawned` | `{}` |
 | `client.vehicle.sync` | `{ id, modelId, x, y, z, health }` |
 | `client.movement.started` | `{ taskId, kind, state, x, y, z, targetX, targetY, targetZ, progress }` |

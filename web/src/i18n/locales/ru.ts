@@ -60,8 +60,11 @@ export default {
     awaitingSpawn: 'Ожидание спавна',
     passenger: 'Пассажир',
     driver: 'Водитель',
-    vehicle: 'Транспорт #{{id}}',
-    onFoot: 'Пешком',
+		vehicle: 'Транспорт #{{id}}',
+		onFoot: 'Пешком',
+		health: 'Здоровье',
+		armour: 'Броня',
+		vehicleHealth: 'Прочность транспорта',
   },
   players: {
     player: 'Игрок',

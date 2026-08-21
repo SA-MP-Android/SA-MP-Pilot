@@ -46,6 +46,7 @@ const snapshot: Snapshot = {
     button2: 'Cancel',
     receivedAt: new Date().toISOString(),
   },
+  localPlayer: { id: -1, health: 0, armour: 0 },
   vehicleState: { inVehicle: false, passenger: false, vehicleId: -1 },
   keyMask: 0,
   afk: false,
@@ -93,6 +94,25 @@ describe('ServerDialog', () => {
 })
 
 describe('Workspace quick commands', () => {
+  it('shows canonical local and current vehicle health, including zero vehicle health', () => {
+    render(
+      <Workspace
+        value={{
+          ...snapshot,
+          activeDialog: null,
+          localPlayer: { id: 7, health: 73.5, armour: 20 },
+          vehicles: [
+            { id: 42, modelId: 411, distance: 0, health: 900, occupied: true, driverName: '', x: 0, y: 0, z: 0 },
+          ],
+          vehicleState: { inVehicle: true, passenger: false, vehicleId: 42, health: 0, healthKnown: true },
+        }}
+        onDelete={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('HP 74 · Armour 20')).toBeTruthy()
+    expect(screen.getByText('Vehicle HP 0')).toBeTruthy()
+  })
+
   it('shows the spawn action only after spawn information is ready', () => {
     const { rerender } = render(
       <Workspace

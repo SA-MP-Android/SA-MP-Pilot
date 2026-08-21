@@ -45,6 +45,7 @@ export function normalizeSnapshot(value: Snapshot): Snapshot {
     textDraws: value.textDraws ?? [],
     dialogs: value.dialogs ?? [],
     commands: value.commands ?? [],
+    localPlayer: value.localPlayer ?? { id: -1, health: 0, armour: 0 },
     spawnReady: value.spawnReady ?? false,
   }
 }
@@ -102,6 +103,9 @@ export function applyInstancePatch(snapshot: Snapshot, patch: InstancePatch): Sn
         break
       case '/activeDialog':
         next.activeDialog = operation.value as Snapshot['activeDialog']
+        break
+      case '/localPlayer':
+        next.localPlayer = operation.value as Snapshot['localPlayer']
         break
       case '/vehicleState':
         next.vehicleState = operation.value as Snapshot['vehicleState']

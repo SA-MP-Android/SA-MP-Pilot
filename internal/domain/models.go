@@ -136,9 +136,16 @@ type QuickCommand struct {
 	Command  string `json:"command"`
 }
 type VehicleState struct {
-	InVehicle bool `json:"inVehicle"`
-	Passenger bool `json:"passenger"`
-	VehicleID int  `json:"vehicleId"`
+	InVehicle   bool    `json:"inVehicle"`
+	Passenger   bool    `json:"passenger"`
+	VehicleID   int     `json:"vehicleId"`
+	Health      float32 `json:"health"`
+	HealthKnown bool    `json:"healthKnown"`
+}
+type LocalPlayer struct {
+	ID     int     `json:"id"`
+	Health float32 `json:"health"`
+	Armour float32 `json:"armour"`
 }
 type Snapshot struct {
 	// Revision is incremented for every state update. Clients use it to detect
@@ -159,6 +166,7 @@ type Snapshot struct {
 	Dialogs       []Dialog       `json:"dialogs"`
 	Commands      []QuickCommand `json:"commands"`
 	ActiveDialog  *Dialog        `json:"activeDialog"`
+	LocalPlayer   LocalPlayer    `json:"localPlayer"`
 	VehicleState  VehicleState   `json:"vehicleState"`
 	KeyMask       int            `json:"keyMask"`
 	AFK           bool           `json:"afk"`

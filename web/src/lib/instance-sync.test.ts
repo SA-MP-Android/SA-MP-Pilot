@@ -29,6 +29,7 @@ function snapshot(revision: number, syncEpoch = 'epoch', overrides: Partial<Snap
     dialogs: [],
     commands: [],
     activeDialog: null,
+    localPlayer: { id: -1, health: 0, armour: 0 },
     vehicleState: { inVehicle: false, passenger: false, vehicleId: -1 },
     keyMask: 0,
     afk: false,

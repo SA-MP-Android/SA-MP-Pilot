@@ -31,6 +31,7 @@ describe('api', () => {
     expect(snapshot.chat).toEqual([])
     expect(snapshot.players).toEqual([])
     expect(snapshot.commands).toEqual([])
+    expect(snapshot.localPlayer).toEqual({ id: -1, health: 0, armour: 0 })
   })
 
   it('normalizes a null instance list', async () => {
@@ -112,6 +113,8 @@ describe('api', () => {
       syncEpoch: 'epoch',
       operations: [
         { op: 'replace', path: '/connection', value: { status: 'connected' } },
+        { op: 'replace', path: '/localPlayer', value: { id: 7, health: 73.5, armour: 20 } },
+        { op: 'replace', path: '/vehicleState', value: { inVehicle: true, passenger: false, vehicleId: 42, health: 0, healthKnown: true } },
         { op: 'replace', path: '/spawned', value: true },
         { op: 'replace', path: '/spawnReady', value: true },
       ],
@@ -119,6 +122,8 @@ describe('api', () => {
     expect(applyInstancePatch(current, patch)).toMatchObject({
       revision: 8,
       connection: { status: 'connected' },
+      localPlayer: { id: 7, health: 73.5, armour: 20 },
+      vehicleState: { inVehicle: true, passenger: false, vehicleId: 42, health: 0, healthKnown: true },
       spawned: true,
       spawnReady: true,
       server: { id: 'instance' },

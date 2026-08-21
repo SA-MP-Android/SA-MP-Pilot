@@ -61,7 +61,9 @@ const (
 	EventClientPlayerSync       = "client.player.sync"
 	EventClientPosition         = "client.position"
 	EventClientAppearance       = "client.appearance"
+	EventClientPlayerHealth     = "client.player.health"
 	EventClientVehicleState     = "client.vehicle.state"
+	EventClientVehicleHealth    = "client.vehicle.health"
 	EventClientSpawned          = "client.spawned"
 	EventClientVehicleSync      = "client.vehicle.sync"
 	EventClientMovement         = "client.movement"
@@ -246,6 +248,11 @@ type PlayerSyncEventData struct {
 	Color    string  `json:"color,omitempty"`
 }
 
+type PlayerHealthEventData struct {
+	Health float32 `json:"health"`
+	Armour float32 `json:"armour"`
+}
+
 type PositionEventData struct {
 	X float32 `json:"x"`
 	Y float32 `json:"y"`
@@ -264,9 +271,16 @@ type AppearanceEventData struct {
 }
 
 type VehicleStateEventData struct {
-	InVehicle bool `json:"inVehicle"`
-	Passenger bool `json:"passenger"`
-	VehicleID int  `json:"vehicleId"`
+	InVehicle   bool    `json:"inVehicle"`
+	Passenger   bool    `json:"passenger"`
+	VehicleID   int     `json:"vehicleId"`
+	Health      float32 `json:"health"`
+	HealthKnown bool    `json:"healthKnown"`
+}
+
+type VehicleHealthEventData struct {
+	ID     int     `json:"id"`
+	Health float32 `json:"health"`
 }
 
 type MovementEventData struct {
