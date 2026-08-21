@@ -12,6 +12,8 @@ export const DEBUG_ASYNC_TIMEOUT_MS = 15_000
 export const LOG_LEVEL_INFO = 'info'
 export const LOG_LEVEL_WARN = 'warn'
 export const LOG_LEVEL_ERROR = 'error'
+export const VEHICLE_ENTRY_DIRECT = 'direct'
+export const VEHICLE_ENTRY_NORMAL = 'normal'
 
 const MESSAGE_READY = 'ready'
 const MESSAGE_EVENT = 'event'
@@ -272,7 +274,8 @@ export function instanceApi(instanceId) {
     setKeys: (mask) => api(METHOD.setKeys, instanceId, { mask }),
     setAFK: (enabled) => api(METHOD.setAFK, instanceId, { enabled }),
     teleport: (x, y, z) => api(METHOD.teleport, instanceId, { x, y, z }),
-    enterVehicle: (vehicleId, passenger = false) => api(METHOD.enterVehicle, instanceId, { vehicleId, passenger }),
+    enterVehicle: (vehicleId, passenger = false, mode = VEHICLE_ENTRY_DIRECT) =>
+      api(METHOD.enterVehicle, instanceId, { vehicleId, passenger, mode }),
     exitVehicle: () => api(METHOD.exitVehicle, instanceId),
     walkTo: (x, y, z, options = {}) => api(METHOD.walkTo, instanceId, { ...options, x, y, z }),
     driveTo: (x, y, z, options = {}) => api(METHOD.driveTo, instanceId, { ...options, x, y, z }),

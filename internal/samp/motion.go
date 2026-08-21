@@ -426,7 +426,7 @@ func (c *Client) advanceMotion(now time.Time) {
 	c.motionMu.Unlock()
 
 	if requestEnter {
-		if err := c.EnterVehicle(c.ctx, task.vehicleID, false); err != nil {
+		if err := c.EnterVehicle(c.ctx, task.vehicleID, false, VehicleEntryDirect); err != nil {
 			c.finishMotion(task.id, MotionFailed, err.Error())
 		}
 		return

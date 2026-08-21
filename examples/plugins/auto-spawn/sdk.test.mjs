@@ -6,15 +6,14 @@ import test from 'node:test'
 
 const sdkURL = pathToFileURL(fileURLToPath(new URL('./sdk.mjs', import.meta.url))).href
 
-function startFixture() {
-  const source = `
+function startFixture(source = `
 import { EVENT_CLIENT_CHAT, log, on, start } from ${JSON.stringify(sdkURL)}
 on(EVENT_CLIENT_CHAT, async (event, instance) => {
   log('info', event.data.text)
   await instance.sendChat('hello')
 })
 await start()
-`
+`) {
   const child = spawn(process.execPath, ['--input-type=module', '--eval', source], {
     stdio: ['pipe', 'pipe', 'pipe'],
   })
@@ -54,6 +53,29 @@ await start()
     })
   return child
 }
+
+test('SDK encodes the normal vehicle entry mode', async () => {
+  const source = `
+import { instanceApi, start, VEHICLE_ENTRY_NORMAL } from ${JSON.stringify(sdkURL)}
+const run = start()
+setTimeout(() => instanceApi('instance-1').enterVehicle(42, true, VEHICLE_ENTRY_NORMAL), 0)
+await run
+`
+  const child = startFixture(source)
+  try {
+    const ready = await child.nextMessage()
+    assert.equal(ready.type, 'ready')
+    const call = await child.nextMessage()
+    assert.equal(call.type, 'call')
+    assert.equal(call.method, 'instance.enterVehicle')
+    assert.equal(call.instanceId, 'instance-1')
+    assert.deepEqual(call.params, { vehicleId: 42, passenger: true, mode: 'normal' })
+    child.stdin.write(`${JSON.stringify({ type: 'result', id: call.id })}\n`)
+  } finally {
+    child.stdin.end()
+    await once(child, 'exit')
+  }
+})
 
 test('SDK exposes the canonical event contract and handles API responses', async () => {
   const child = startFixture()

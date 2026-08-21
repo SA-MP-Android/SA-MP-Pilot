@@ -356,6 +356,35 @@ func TestVehicleTransitionRequiresExitBeforeChangingVehicle(t *testing.T) {
 	}
 }
 
+func TestVehicleEntryModes(t *testing.T) {
+	if got, err := NormalizeVehicleEntryMode(""); err != nil || got != VehicleEntryDirect {
+		t.Fatalf("empty mode = %q, error = %v; want direct", got, err)
+	}
+	for _, mode := range []VehicleEntryMode{VehicleEntryDirect, VehicleEntryNormal} {
+		if got, err := NormalizeVehicleEntryMode(mode); err != nil || got != mode {
+			t.Fatalf("mode %q normalized to %q with error %v", mode, got, err)
+		}
+	}
+	if _, err := NormalizeVehicleEntryMode("instant"); err == nil {
+		t.Fatal("unsupported vehicle entry mode unexpectedly succeeded")
+	}
+}
+
+func TestNormalVehicleEntryRequiresAStreamedNearbyVehicle(t *testing.T) {
+	c := &Client{
+		position: [3]float32{0, 0, 0},
+		vehicles: map[uint16]VehicleEvent{
+			42: {ID: 42, X: 20, Y: 0, Z: 0},
+		},
+	}
+	if err := c.EnterVehicle(context.Background(), 42, false, VehicleEntryNormal); !errors.Is(err, ErrVehicleEntryOutOfRange) {
+		t.Fatalf("far normal entry error = %v, want %v", err, ErrVehicleEntryOutOfRange)
+	}
+	if err := c.EnterVehicle(context.Background(), 43, false, VehicleEntryNormal); !errors.Is(err, ErrVehicleEntryOutOfRange) {
+		t.Fatalf("unknown normal entry error = %v, want %v", err, ErrVehicleEntryOutOfRange)
+	}
+}
+
 func TestRejectedRequestClassDoesNotRequireSpawnInfo(t *testing.T) {
 	event, err := (&Client{}).decodeRPC(raknet.RPC{ID: RPCRequestClass, Payload: []byte{0}, PayloadBits: 8})
 	if err != nil {

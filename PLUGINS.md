@@ -163,12 +163,12 @@ await instance.setAFK(true)
 await instance.teleport(1, 2, 3)
 const vehicle = (await instance.getSnapshot()).vehicles.find((item) => item.distance <= 4.5)
 if (!vehicle) throw new Error('no nearby vehicle')
-await instance.enterVehicle(vehicle.id)
+await instance.enterVehicle(vehicle.id, false, 'normal')
 // Observe client.vehicle.state with inVehicle: true before treating entry as confirmed.
-const walk = await instance.walkTo(10, 20, 3, { speed: 1.4, tolerance: 0.35 })
 const drive = await instance.driveTo(100, 200, 5, { vehicleId: vehicle.id, speed: 12, tolerance: 1 })
-await instance.stopMovement()
 await instance.exitVehicle()
+const walk = await instance.walkTo(10, 20, 3, { speed: 1.4, tolerance: 0.35 })
+await instance.stopMovement()
 await instance.respondDialog(12, 1, 0, 'password')
 await instance.clickPlayer(42)
 await instance.clickTextDraw(7)
@@ -178,7 +178,7 @@ await instance.deleteCommand(commandId)
 
 `walkTo` and `driveTo` return a task ID immediately. They run one straight-line movement task per instance; starting a new task replaces the current one. `driveTo` requests the driver seat through the normal `instance.enterVehicle` RPC and mirrors the normal client's in-car state after that request is sent; a server-side correction can still end the task. It is rejected immediately if the client is currently a passenger. The task ends when the target tolerance is reached, or when `stopMovement`, a server position correction, AFK, or a disconnect interrupts it. These helpers do not perform collision or path finding, so they require no game assets or map downloads.
 
-`enterVehicle` returns after the request is sent; use `client.vehicle.state` to observe the server confirmation before issuing a dependent action.
+`enterVehicle(vehicleId, passenger = false, mode = 'direct')` accepts two entry modes. `direct` is the backward-compatible default: it sends `RPC_EnterVehicle` and starts vehicle/passenger sync immediately. `normal` follows the network-visible sequence of the regular client: it sends the same `RPC_EnterVehicle` at entry start, walks toward the streamed vehicle with on-foot sync when necessary, keeps that sync during the entry phase, then switches to vehicle/passenger sync. It requires the streamed vehicle to be within the normal 8-meter entry range. It does not fabricate the server-to-client `PutPlayerInVehicle` RPC; that RPC is reserved for server-forced placement. The headless client has no GTA animation task, so `normal` models the task's observable RPC/sync timing. The method resolves after its transition phase; for both modes, `client.vehicle.state` is the event to observe before issuing a dependent action.
 
 Vehicle IDs are server entity IDs from `snapshot.vehicles[].id`, not GTA model IDs such as `411`. The vehicle should be streamed and within normal entry range before calling `enterVehicle` or `driveTo`.
 
@@ -210,7 +210,7 @@ Low-level method names are:
 | `instance.refreshScores` | Request score refresh |
 | `instance.setKeys` / `instance.setAFK` | Control input state |
 | `instance.teleport` | Teleport and synchronize |
-| `instance.enterVehicle` / `instance.exitVehicle` | Vehicle control |
+| `instance.enterVehicle` / `instance.exitVehicle` | Vehicle control; `enterVehicle` supports `direct` and `normal` modes |
 | `instance.walkTo` / `instance.driveTo` / `instance.stopMovement` | Start or cancel plugin-controlled straight-line movement |
 | `instance.respondDialog` | Respond to a Dialog |
 | `instance.clickPlayer` / `instance.clickTextDraw` | Click UI targets |

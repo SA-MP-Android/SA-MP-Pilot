@@ -1001,13 +1001,27 @@ func (m *Manager) action(ctx context.Context, id, action string, p map[string]an
 				return errors.New("passenger must be a boolean")
 			}
 		}
+		entryMode := samp.VehicleEntryDirect
+		if rawMode, exists := p["mode"]; exists {
+			mode, ok := rawMode.(string)
+			if !ok {
+				i.mu.Unlock()
+				return errors.New("mode must be a string")
+			}
+			entryMode = samp.VehicleEntryMode(mode)
+		}
+		entryMode, err = samp.NormalizeVehicleEntryMode(entryMode)
+		if err != nil {
+			i.mu.Unlock()
+			return err
+		}
 		i.mu.Unlock()
-		// A direct vehicle transition must cancel a previous walk/drive task;
+		// A vehicle transition must cancel a previous walk/drive task;
 		// otherwise its next tick can overwrite the vehicle position and make
 		// the server remove the player immediately after entry.
 		client.StopMovement()
 		requestCtx, cancel := actionContext(ctx)
-		actionErr := client.EnterVehicle(requestCtx, vehicleID, passenger)
+		actionErr := client.EnterVehicle(requestCtx, vehicleID, passenger, entryMode)
 		cancel()
 		if actionErr != nil {
 			return actionErr

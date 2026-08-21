@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/raknet"
 	"golang.org/x/text/encoding"
+	"math"
 	"sync"
 	"time"
 )
@@ -70,16 +71,25 @@ const (
 	// SA-MP on-foot send rate is 30 ms. Keep the Go sync cadence close to that
 	// loop so the first sync is emitted by the next tick after RPC_Spawn,
 	// instead of being written from inside the spawn RPC handler.
-	playerSyncInterval              = 30 * time.Millisecond
-	scoreRefreshInterval            = 3 * time.Second
-	statsUpdateInterval             = time.Second
-	targetFramesPerSecond    uint32 = 60
-	defaultPlayerMoney       int32  = 0
-	gameHandshakeTimeout            = 15 * time.Second
-	defaultPlayerHealth      uint8  = 100
-	clientCheckMemoryType    uint8  = 0x48
-	serverForcedSpawnOutcome uint8  = 2
-	initialClassIndex        uint32 = 0
+	playerSyncInterval = 30 * time.Millisecond
+	// A real GTA entry task keeps the ped on foot for roughly this interval
+	// before the local game starts emitting vehicle/passenger sync. There is no
+	// animation or task engine in the headless client, so normal entry models
+	// the network-visible part of that transition with this bounded phase.
+	normalVehicleEntryDuration              = 1200 * time.Millisecond
+	normalVehicleEntryMaxDuration           = 3 * time.Second
+	normalVehicleEntryApproachSpeed float32 = 3
+	normalVehicleEntryStandOff      float32 = 1.25
+	normalVehicleEntryMaxDistance   float32 = 8
+	scoreRefreshInterval                    = 3 * time.Second
+	statsUpdateInterval                     = time.Second
+	targetFramesPerSecond           uint32  = 60
+	defaultPlayerMoney              int32   = 0
+	gameHandshakeTimeout                    = 15 * time.Second
+	defaultPlayerHealth             uint8   = 100
+	clientCheckMemoryType           uint8   = 0x48
+	serverForcedSpawnOutcome        uint8   = 2
+	initialClassIndex               uint32  = 0
 	// CLocalPlayer::ProcessClassSelection in Android raksamp runs on the
 	// roughly 30 FPS network loop, so its first RequestClass is sent on the
 	// next tick after InitGame rather than after a half-second fallback wait.
@@ -95,11 +105,41 @@ type ClientOptions struct {
 }
 
 var (
-	ErrNicknameTooLong = errors.New("samp: nickname is too long")
-	ErrMessageTooLong  = errors.New("samp: message is too long")
-	ErrMalformedPacket = errors.New("samp: malformed packet")
-	ErrSpawnNotReady   = errors.New("samp: spawn information is not ready")
+	ErrNicknameTooLong        = errors.New("samp: nickname is too long")
+	ErrMessageTooLong         = errors.New("samp: message is too long")
+	ErrMalformedPacket        = errors.New("samp: malformed packet")
+	ErrSpawnNotReady          = errors.New("samp: spawn information is not ready")
+	ErrVehicleEntryInProgress = errors.New("samp: another vehicle entry is already in progress")
+	ErrVehicleEntryCanceled   = errors.New("samp: vehicle entry was canceled before completion")
+	ErrVehicleEntryOutOfRange = errors.New("samp: vehicle is not streamed or is outside the normal entry range")
 )
+
+// VehicleEntryMode controls how the headless client transitions from on-foot
+// to vehicle synchronization. Direct is the historical behavior: the local
+// state changes as soon as RPC_EnterVehicle is sent. Normal preserves the
+// network sequence of a regular client: RPC_EnterVehicle marks the beginning
+// of entry, on-foot sync continues during the entry task, and vehicle sync
+// starts only after the entry phase completes.
+type VehicleEntryMode string
+
+const (
+	VehicleEntryDirect VehicleEntryMode = "direct"
+	VehicleEntryNormal VehicleEntryMode = "normal"
+)
+
+// NormalizeVehicleEntryMode validates an entry mode and maps the empty value
+// to the backward-compatible direct mode.
+func NormalizeVehicleEntryMode(mode VehicleEntryMode) (VehicleEntryMode, error) {
+	if mode == "" {
+		return VehicleEntryDirect, nil
+	}
+	switch mode {
+	case VehicleEntryDirect, VehicleEntryNormal:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("samp: unsupported vehicle entry mode %q (want %q or %q)", mode, VehicleEntryDirect, VehicleEntryNormal)
+	}
+}
 
 type EventType string
 
@@ -234,9 +274,14 @@ type Client struct {
 	enterPending          bool
 	enterPendingVehicle   uint16
 	enterPendingPassenger bool
+	enterPendingMode      VehicleEntryMode
+	enterPendingLastTick  time.Time
+	enterPendingTarget    [3]float32
+	enterPendingHasTarget bool
 	enterQueued           bool
 	enterQueuedVehicle    uint16
 	enterQueuedPassenger  bool
+	enterQueuedMode       VehicleEntryMode
 	exitPending           bool
 }
 
@@ -448,29 +493,52 @@ func (c *Client) Teleport(ctx context.Context, x, y, z float32) error {
 	c.stateMu.Unlock()
 	return c.sendSync(ctx)
 }
-func (c *Client) EnterVehicle(ctx context.Context, vehicleID uint16, passenger bool) error {
+func (c *Client) EnterVehicle(ctx context.Context, vehicleID uint16, passenger bool, requestedMode VehicleEntryMode) error {
+	mode, err := NormalizeVehicleEntryMode(requestedMode)
+	if err != nil {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	c.stateMu.RLock()
 	inVehicle := c.inVehicle
 	currentVehicleID := c.vehicleID
 	currentPassenger := c.passenger
-	pending := c.enterPending && c.enterPendingVehicle == vehicleID && c.enterPendingPassenger == passenger
-	queued := c.enterQueued && c.enterQueuedVehicle == vehicleID && c.enterQueuedPassenger == passenger
+	pending := c.enterPending
+	pendingSame := pending && c.enterPendingVehicle == vehicleID && c.enterPendingPassenger == passenger && c.enterPendingMode == mode
+	queued := c.enterQueued
+	queuedSame := queued && c.enterQueuedVehicle == vehicleID && c.enterQueuedPassenger == passenger && c.enterQueuedMode == mode
 	c.stateMu.RUnlock()
 	if inVehicle && currentVehicleID == vehicleID && currentPassenger == passenger {
 		return nil
 	}
-	if pending || queued {
+	if pendingSame || queuedSame {
 		return nil
+	}
+	if pending || queued {
+		return ErrVehicleEntryInProgress
+	}
+	if mode == VehicleEntryNormal {
+		c.stateMu.RLock()
+		vehicle, known := c.vehicles[vehicleID]
+		position := c.position
+		c.stateMu.RUnlock()
+		if !known || distance3(position, [3]float32{vehicle.X, vehicle.Y, vehicle.Z}) > normalVehicleEntryMaxDistance {
+			return ErrVehicleEntryOutOfRange
+		}
 	}
 	if needsVehicleExit(inVehicle, currentVehicleID, currentPassenger, vehicleID, passenger) {
 		c.stateMu.Lock()
 		c.enterQueued = true
 		c.enterQueuedVehicle = vehicleID
 		c.enterQueuedPassenger = passenger
+		c.enterQueuedMode = mode
 		c.stateMu.Unlock()
-		if err := c.ExitVehicle(ctx); err != nil {
+		if err := c.exitVehicle(ctx, ctx); err != nil {
 			c.stateMu.Lock()
 			c.enterQueued = false
+			c.enterQueuedMode = ""
 			c.stateMu.Unlock()
 			return err
 		}
@@ -485,6 +553,42 @@ func (c *Client) EnterVehicle(ctx context.Context, vehicleID uint16, passenger b
 	c.enterPending = true
 	c.enterPendingVehicle = vehicleID
 	c.enterPendingPassenger = passenger
+	c.enterPendingMode = mode
+	if mode == VehicleEntryNormal {
+		// The regular client starts the entry task while still on foot and turns
+		// toward the vehicle. This heading is visible in the on-foot sync frames
+		// sent during the entry phase.
+		if vehicle, ok := c.vehicles[vehicleID]; ok {
+			direction := [3]float32{vehicle.X - c.position[0], vehicle.Y - c.position[1], vehicle.Z - c.position[2]}
+			if math.Hypot(float64(direction[0]), float64(direction[1])) >= 0.000001 {
+				c.onFootQuaternion = yawQuaternion(yawForDirection(direction))
+			}
+			// CPlayerPed::EnterVehicle lets GTA walk the ped to the vehicle
+			// door. Without a game task, approach a short distance from the
+			// streamed vehicle transform and keep publishing on-foot sync.
+			horizontalDistance := float32(math.Hypot(float64(direction[0]), float64(direction[1])))
+			if horizontalDistance > normalVehicleEntryStandOff {
+				inv := 1 / horizontalDistance
+				c.enterPendingTarget = [3]float32{
+					vehicle.X - direction[0]*inv*normalVehicleEntryStandOff,
+					vehicle.Y - direction[1]*inv*normalVehicleEntryStandOff,
+					c.position[2],
+				}
+				c.enterPendingHasTarget = true
+			}
+		}
+	}
+	entryDuration := normalVehicleEntryDuration
+	if mode == VehicleEntryNormal && c.enterPendingHasTarget {
+		approachDistance := distance3(c.position, c.enterPendingTarget)
+		entryDuration += time.Duration(float64(approachDistance/normalVehicleEntryApproachSpeed) * float64(time.Second))
+		if entryDuration > normalVehicleEntryMaxDuration {
+			entryDuration = normalVehicleEntryMaxDuration
+		}
+	}
+	if mode == VehicleEntryNormal {
+		c.enterPendingLastTick = time.Now()
+	}
 	c.stateMu.Unlock()
 	w := raknet.Writer{}
 	w.Uint16(vehicleID)
@@ -495,24 +599,73 @@ func (c *Client) EnterVehicle(ctx context.Context, vehicleID uint16, passenger b
 	}
 	if err := c.sendRPC(ctx, RPCEnterVehicle, &w, raknet.ReliableSequenced); err != nil {
 		c.stateMu.Lock()
-		if c.enterPending && c.enterPendingVehicle == vehicleID && c.enterPendingPassenger == passenger {
+		if c.enterPending && c.enterPendingVehicle == vehicleID && c.enterPendingPassenger == passenger && c.enterPendingMode == mode {
 			c.enterPending = false
+			c.enterPendingMode = ""
+			c.enterPendingLastTick = time.Time{}
+			c.enterPendingTarget = [3]float32{}
+			c.enterPendingHasTarget = false
 		}
 		c.stateMu.Unlock()
 		c.syncMu.Unlock()
 		return err
 	}
-	// RPC_EnterVehicle is the local client's request to begin entering. The
-	// server normally does not echo PutPlayerInVehicle back to the requesting
-	// player; that RPC is for server-forced placement. Mirror the normal client
-	// state immediately so the next sync is vehicle/passenger sync and the UI
-	// does not remain on foot waiting for an RPC that will not arrive.
+	if mode == VehicleEntryDirect {
+		// RPC_EnterVehicle is the local client's request to begin entering. The
+		// server normally does not echo PutPlayerInVehicle back to the requesting
+		// player; that RPC is for server-forced placement. Direct mode mirrors the
+		// historical headless behavior immediately so the next sync is vehicle or
+		// passenger sync.
+		seatID := uint8(0)
+		if passenger {
+			seatID = 1
+		}
+		c.setVehicleState(vehicleID, seatID)
+		c.syncMu.Unlock()
+		c.emit(Event{Type: EventVehicleState, Data: VehicleStateEvent{InVehicle: true, Passenger: passenger, VehicleID: vehicleID}})
+		return nil
+	}
+	c.syncMu.Unlock()
+
+	// The real client sends on-foot sync while the GTA enter task is active.
+	// Emit one immediately so a caller does not depend on the next 30 ms tick
+	// to establish the correct post-RPC packet sequence.
+	if err := c.sendSync(ctx); err != nil {
+		c.cancelPendingVehicleEntry(vehicleID, passenger, mode)
+		return err
+	}
+
+	timer := time.NewTimer(entryDuration)
+	defer timer.Stop()
+	var clientDone <-chan struct{}
+	if c.ctx != nil {
+		clientDone = c.ctx.Done()
+	}
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+		c.cancelPendingVehicleEntry(vehicleID, passenger, mode)
+		return ctx.Err()
+	case <-clientDone:
+		c.cancelPendingVehicleEntry(vehicleID, passenger, mode)
+		return context.Canceled
+	}
+
+	c.stateMu.RLock()
+	completedByServer := c.inVehicle && c.vehicleID == vehicleID && c.passenger == passenger
+	stillPending := c.enterPending && c.enterPendingVehicle == vehicleID && c.enterPendingPassenger == passenger && c.enterPendingMode == mode
+	c.stateMu.RUnlock()
+	if completedByServer {
+		return nil
+	}
+	if !stillPending {
+		return ErrVehicleEntryCanceled
+	}
 	seatID := uint8(0)
 	if passenger {
 		seatID = 1
 	}
 	c.setVehicleState(vehicleID, seatID)
-	c.syncMu.Unlock()
 	c.emit(Event{Type: EventVehicleState, Data: VehicleStateEvent{InVehicle: true, Passenger: passenger, VehicleID: vehicleID}})
 	return nil
 }
@@ -520,26 +673,56 @@ func (c *Client) EnterVehicle(ctx context.Context, vehicleID uint16, passenger b
 func needsVehicleExit(inVehicle bool, currentVehicleID uint16, currentPassenger bool, targetVehicleID uint16, targetPassenger bool) bool {
 	return inVehicle && (currentVehicleID != targetVehicleID || currentPassenger != targetPassenger)
 }
+
+func (c *Client) cancelPendingVehicleEntry(vehicleID uint16, passenger bool, mode VehicleEntryMode) {
+	c.stateMu.Lock()
+	if c.enterPending && c.enterPendingVehicle == vehicleID && c.enterPendingPassenger == passenger && c.enterPendingMode == mode {
+		c.enterPending = false
+		c.enterPendingMode = ""
+		c.enterPendingLastTick = time.Time{}
+		c.enterPendingTarget = [3]float32{}
+		c.enterPendingHasTarget = false
+	}
+	c.stateMu.Unlock()
+}
+
 func (c *Client) ExitVehicle(ctx context.Context) error {
-	c.stateMu.RLock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return c.exitVehicle(ctx, nil)
+}
+
+func (c *Client) exitVehicle(ctx, queuedContext context.Context) error {
+	c.stateMu.Lock()
 	vehicleID := c.vehicleID
 	inVehicle := c.inVehicle
 	pending := c.exitPending
-	c.stateMu.RUnlock()
 	if !inVehicle {
-		c.stateMu.Lock()
 		c.enterPending = false
+		c.enterPendingMode = ""
+		c.enterPendingLastTick = time.Time{}
+		c.enterPendingTarget = [3]float32{}
+		c.enterPendingHasTarget = false
+		c.exitPending = false
 		c.enterQueued = false
+		c.enterQueuedMode = ""
 		c.stateMu.Unlock()
 		return nil
 	}
 	if pending {
+		c.stateMu.Unlock()
 		return nil
 	}
+	c.exitPending = true
+	c.stateMu.Unlock()
 	c.syncMu.Lock()
 	w := raknet.Writer{}
 	w.Uint16(vehicleID)
 	if err := c.sendRPC(ctx, RPCExitVehicle, &w, raknet.ReliableSequenced); err != nil {
+		c.stateMu.Lock()
+		c.exitPending = false
+		c.stateMu.Unlock()
 		c.syncMu.Unlock()
 		return err
 	}
@@ -549,11 +732,17 @@ func (c *Client) ExitVehicle(ctx context.Context) error {
 	c.stateMu.Lock()
 	queuedVehicle := c.enterQueuedVehicle
 	queuedPassenger := c.enterQueuedPassenger
+	queuedMode := c.enterQueuedMode
 	shouldEnter := c.enterQueued
 	c.vehicleID, c.inVehicle, c.passenger, c.vehicleSeat = 0, false, false, 0
 	c.enterPending = false
+	c.enterPendingMode = ""
+	c.enterPendingLastTick = time.Time{}
+	c.enterPendingTarget = [3]float32{}
+	c.enterPendingHasTarget = false
 	c.exitPending = false
 	c.enterQueued = false
+	c.enterQueuedMode = ""
 	c.vehicleVelocity = [3]float32{}
 	c.vehicleQuaternion = [4]float32{}
 	c.vehicleLRAnalog, c.vehicleUDAnalog, c.vehicleProtocolKeys = 0, 0, 0
@@ -562,7 +751,10 @@ func (c *Client) ExitVehicle(ctx context.Context) error {
 	c.syncMu.Unlock()
 	c.emit(Event{Type: EventVehicleState, Data: VehicleStateEvent{}})
 	if shouldEnter && c.ctx != nil {
-		if err := c.EnterVehicle(c.ctx, queuedVehicle, queuedPassenger); err != nil {
+		if queuedContext == nil {
+			queuedContext = c.ctx
+		}
+		if err := c.EnterVehicle(queuedContext, queuedVehicle, queuedPassenger, queuedMode); err != nil {
 			c.emit(Event{Type: EventProtocolError, Data: err.Error()})
 		}
 	}
@@ -581,11 +773,46 @@ func (c *Client) syncLoop() {
 			c.stateMu.RUnlock()
 			if shouldSync {
 				c.advanceMotion(time.Now())
+				c.advanceVehicleEntry(time.Now())
 				_ = c.sendSync(c.ctx)
 			}
 		}
 	}
 }
+
+// advanceVehicleEntry emulates the movement portion of GTA's enter-vehicle
+// task. It only updates the on-foot frame; the caller that started the entry
+// owns the timed transition to vehicle/passenger state.
+func (c *Client) advanceVehicleEntry(now time.Time) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if !c.enterPending || c.enterPendingMode != VehicleEntryNormal || !c.enterPendingHasTarget {
+		return
+	}
+	if c.enterPendingLastTick.IsZero() {
+		c.enterPendingLastTick = now
+		return
+	}
+	dt := float32(now.Sub(c.enterPendingLastTick).Seconds())
+	if dt <= 0 {
+		return
+	}
+	if dt > 0.2 {
+		dt = 0.2
+	}
+	c.enterPendingLastTick = now
+	next, velocity, reached := moveTowards(c.position, c.enterPendingTarget, normalVehicleEntryApproachSpeed, dt)
+	c.position = next
+	c.onFootVelocity = syncVelocity(velocity)
+	c.onFootUDAnalog = analogWire(analogForward)
+	c.onFootLRAnalog = 0
+	c.onFootProtocolKeys = 0
+	if reached {
+		c.onFootVelocity = [3]float32{}
+		c.onFootUDAnalog = 0
+	}
+}
+
 func (c *Client) scoreLoop() {
 	ticker := time.NewTicker(scoreRefreshInterval)
 	defer ticker.Stop()
@@ -603,10 +830,10 @@ func (c *Client) sendSync(ctx context.Context) error {
 	defer c.syncMu.Unlock()
 	c.stateMu.RLock()
 	spawned, inVehicle, passenger := c.spawned, c.inVehicle, c.passenger
-	if !inVehicle && c.enterPending {
+	if !inVehicle && c.enterPending && c.enterPendingMode == VehicleEntryDirect {
 		// A normal client changes its local GTA state as soon as the enter
-		// action starts. Mirror that on the wire while waiting for the server
-		// confirmation so no on-foot packet can follow the enter RPC.
+		// action starts. Keep this compatibility path for the tiny interval
+		// between sending the direct-mode RPC and mirroring its local state.
 		inVehicle = true
 		passenger = c.enterPendingPassenger
 	}
@@ -638,7 +865,7 @@ func (c *Client) sendVehicle(ctx context.Context, passenger bool) error {
 	vehicleID, position, mask := c.vehicleID, c.position, c.keyMask
 	vehicleQuaternion := c.vehicleQuaternion
 	vehicleSeat := c.vehicleSeat
-	pendingEntry := !c.inVehicle && c.enterPending
+	pendingEntry := !c.inVehicle && c.enterPending && c.enterPendingMode == VehicleEntryDirect
 	if pendingEntry {
 		vehicleID = c.enterPendingVehicle
 		if passenger && vehicleSeat == 0 {
@@ -1430,8 +1657,13 @@ func (c *Client) setOnFootPosition(position [3]float32) {
 	c.vehicleID = 0
 	c.vehicleSeat = 0
 	c.enterPending = false
+	c.enterPendingMode = ""
+	c.enterPendingLastTick = time.Time{}
+	c.enterPendingTarget = [3]float32{}
+	c.enterPendingHasTarget = false
 	c.exitPending = false
 	c.enterQueued = false
+	c.enterQueuedMode = ""
 	c.clearMotionFrameLocked()
 	c.stateMu.Unlock()
 }
@@ -1440,8 +1672,13 @@ func (c *Client) setVehicleState(vehicleID uint16, seatID uint8) {
 	c.stateMu.Lock()
 	c.vehicleID, c.inVehicle, c.passenger, c.vehicleSeat = vehicleID, true, seatID != 0, seatID
 	c.enterPending = false
+	c.enterPendingMode = ""
+	c.enterPendingLastTick = time.Time{}
+	c.enterPendingTarget = [3]float32{}
+	c.enterPendingHasTarget = false
 	c.exitPending = false
 	c.enterQueued = false
+	c.enterQueuedMode = ""
 	c.vehicleHealth = 0
 	c.vehicleQuaternion = [4]float32{}
 	if vehicle, ok := c.vehicles[vehicleID]; ok {
@@ -1458,10 +1695,15 @@ func (c *Client) setVehicleState(vehicleID uint16, seatID uint8) {
 func (c *Client) clearVehicleState() {
 	var queuedVehicle uint16
 	var queuedPassenger bool
+	var queuedMode VehicleEntryMode
 	var shouldEnter bool
 	c.stateMu.Lock()
 	c.vehicleID, c.inVehicle, c.passenger, c.vehicleSeat = 0, false, false, 0
 	c.enterPending = false
+	c.enterPendingMode = ""
+	c.enterPendingLastTick = time.Time{}
+	c.enterPendingTarget = [3]float32{}
+	c.enterPendingHasTarget = false
 	c.exitPending = false
 	c.vehicleVelocity = [3]float32{}
 	c.vehicleQuaternion = [4]float32{}
@@ -1470,12 +1712,14 @@ func (c *Client) clearVehicleState() {
 	if c.enterQueued {
 		queuedVehicle = c.enterQueuedVehicle
 		queuedPassenger = c.enterQueuedPassenger
+		queuedMode = c.enterQueuedMode
 		shouldEnter = true
 		c.enterQueued = false
+		c.enterQueuedMode = ""
 	}
 	c.stateMu.Unlock()
 	if shouldEnter && c.ctx != nil {
-		if err := c.EnterVehicle(c.ctx, queuedVehicle, queuedPassenger); err != nil {
+		if err := c.EnterVehicle(c.ctx, queuedVehicle, queuedPassenger, queuedMode); err != nil {
 			c.emit(Event{Type: EventProtocolError, Data: err.Error()})
 		}
 	}
