@@ -48,6 +48,8 @@ export const EVENT_CLIENT_PLAYER_SYNC = 'client.player.sync'
 export const EVENT_CLIENT_POSITION = 'client.position'
 export const EVENT_CLIENT_APPEARANCE = 'client.appearance'
 export const EVENT_CLIENT_PLAYER_HEALTH = 'client.player.health'
+export const EVENT_CLIENT_PLAYER_LIFE_STATE = 'client.player.state'
+export const EVENT_CLIENT_PLAYER_DEATH = 'client.player.death'
 export const EVENT_CLIENT_VEHICLE_STATE = 'client.vehicle.state'
 export const EVENT_CLIENT_VEHICLE_HEALTH = 'client.vehicle.health'
 export const EVENT_CLIENT_SPAWNED = 'client.spawned'
@@ -112,6 +114,8 @@ export const EVENTS = Object.freeze({
   clientPosition: EVENT_CLIENT_POSITION,
   clientAppearance: EVENT_CLIENT_APPEARANCE,
   clientPlayerHealth: EVENT_CLIENT_PLAYER_HEALTH,
+  clientPlayerLifeState: EVENT_CLIENT_PLAYER_LIFE_STATE,
+  clientPlayerDeath: EVENT_CLIENT_PLAYER_DEATH,
   clientVehicleState: EVENT_CLIENT_VEHICLE_STATE,
   clientVehicleHealth: EVENT_CLIENT_VEHICLE_HEALTH,
   clientSpawned: EVENT_CLIENT_SPAWNED,

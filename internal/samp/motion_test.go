@@ -66,10 +66,10 @@ func TestWalkToEmitsStartedProgressAndStop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	c := &Client{
-		ctx:      ctx,
-		events:   make(chan Event, 8),
-		spawned:  true,
-		position: [3]float32{0, 0, 0},
+		ctx:       ctx,
+		events:    make(chan Event, 8),
+		lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned},
+		position:  [3]float32{0, 0, 0},
 	}
 	taskID, err := c.WalkTo([3]float32{10, 0, 0}, 1, 0.2)
 	if err != nil {
@@ -105,7 +105,7 @@ func TestDriveToUsesGTAPhysicsVelocityAndVehicleControls(t *testing.T) {
 	c := &Client{
 		ctx:       ctx,
 		events:    make(chan Event, 8),
-		spawned:   true,
+		lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned},
 		inVehicle: true,
 		vehicleID: 42,
 		position:  [3]float32{0, 0, 0},
@@ -138,7 +138,7 @@ func TestDriveToRejectsPassengerImmediately(t *testing.T) {
 	c := &Client{
 		ctx:       ctx,
 		events:    make(chan Event, 8),
-		spawned:   true,
+		lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned},
 		inVehicle: true,
 		passenger: true,
 		vehicleID: 42,

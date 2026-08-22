@@ -80,6 +80,7 @@ export interface LocalPlayer {
   id: number
   health: number
   armour: number
+  lifeState?: 'class_selection' | 'spawn_ready' | 'spawn_request_pending' | 'spawned' | 'dead' | 'disconnected'
 }
 export interface Snapshot {
   revision: number

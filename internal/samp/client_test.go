@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/raknet"
 )
@@ -244,6 +245,267 @@ func TestHealthRPCsUpdateLocalStateAndEmitEvents(t *testing.T) {
 	}
 }
 
+func TestZeroHealthTransitionsSpawnedClientToDeadOnce(t *testing.T) {
+	c := &Client{
+		ctx:       context.Background(),
+		lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned},
+		health:    100,
+		armour:    25,
+	}
+	payload := raknet.Writer{}
+	payload.Float32(0)
+
+	event, err := c.decodeRPC(raknet.RPC{ID: RPCSetPlayerHealth, Payload: payload.Bytes(), PayloadBits: payload.LenBits()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event == nil || event.Type != EventPlayerHealth || event.Data.(PlayerHealthEvent).Health != 0 {
+		t.Fatalf("health event = %+v", event)
+	}
+	if c.lifecycle.spawned || c.lifecycle.state() != PlayerLifeStateDead || !c.lifecycle.deathReported {
+		t.Fatalf("death state = spawned:%v lifeState:%q reported:%v", c.lifecycle.spawned, c.lifecycle.state(), c.lifecycle.deathReported)
+	}
+	pending := c.drainPendingEvents()
+	if len(pending) != 2 || pending[0].Type != EventPlayerLifeState || pending[1].Type != EventPlayerDeath {
+		t.Fatalf("pending death events = %+v", pending)
+	}
+	state := pending[0].Data.(PlayerLifeStateEvent)
+	if state.State != PlayerLifeStateDead {
+		t.Fatalf("death lifecycle event = %+v", state)
+	}
+	death := pending[1].Data.(PlayerDeathEvent)
+	if death.Reason != UnknownDeathReason || death.KillerID != InvalidSAMPPlayerID || death.ReasonKnown || death.Source != DeathSourceServerHealth {
+		t.Fatalf("death event = %+v", death)
+	}
+
+	payload = raknet.Writer{}
+	payload.Float32(0)
+	if _, err = c.decodeRPC(raknet.RPC{ID: RPCSetPlayerHealth, Payload: payload.Bytes(), PayloadBits: payload.LenBits()}); err != nil {
+		t.Fatal(err)
+	}
+	if pending = c.drainPendingEvents(); len(pending) != 0 {
+		t.Fatalf("repeated zero health emitted events = %+v", pending)
+	}
+}
+
+func TestPositiveHealthDoesNotReviveDeadClient(t *testing.T) {
+	c := &Client{lifecycle: playerLifecycle{lifeState: PlayerLifeStateDead}, health: 0}
+	if event := c.setPlayerHealth(75); event.Health != 0 {
+		t.Fatalf("health event = %+v", event)
+	}
+	if c.lifecycle.spawned || c.lifecycle.state() != PlayerLifeStateDead || c.lifecycle.deathReported || !c.respawnHealthKnown || c.respawnHealth != 75 {
+		t.Fatalf("positive health revived client: spawned:%v lifeState:%q reported:%v", c.lifecycle.spawned, c.lifecycle.state(), c.lifecycle.deathReported)
+	}
+	spawned := c.markSpawned()
+	if spawned.Health != 75 || spawned.Armour != 0 {
+		t.Fatalf("deferred spawn health = %+v", spawned)
+	}
+}
+
+func TestVehicleDeathDetachesLocalOccupantWithoutKillingPlayer(t *testing.T) {
+	death := raknet.Writer{}
+	death.Uint16(7)
+
+	driver := &Client{
+		lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned},
+		inVehicle: true, vehicleID: 7, health: 100,
+		vehicles: map[uint16]VehicleEvent{7: {ID: 7, Health: 1000}},
+	}
+	event, err := driver.decodeRPC(raknet.RPC{ID: RPCVehicleDeath, Payload: death.Bytes(), PayloadBits: death.LenBits()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event == nil || driver.lifecycle.state() != PlayerLifeStateSpawned || !driver.lifecycle.spawned || driver.inVehicle {
+		t.Fatalf("driver vehicle death state = event:%+v lifecycle:%+v inVehicle:%v", event, driver.lifecycle, driver.inVehicle)
+	}
+	if driver.vehicles[7].Health != 0 || driver.vehicleHealthKnown {
+		t.Fatalf("driver vehicle health state = vehicle:%+v known:%v", driver.vehicles[7], driver.vehicleHealthKnown)
+	}
+	for _, pending := range driver.drainPendingEvents() {
+		if pending.Type == EventPlayerDeath {
+			t.Fatal("vehicle death must not emit player death")
+		}
+	}
+
+	passenger := &Client{
+		lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned},
+		inVehicle: true, passenger: true, vehicleID: 7,
+		vehicles: map[uint16]VehicleEvent{7: {ID: 7, Health: 1000}},
+	}
+	if _, err = passenger.decodeRPC(raknet.RPC{ID: RPCVehicleDeath, Payload: death.Bytes(), PayloadBits: death.LenBits()}); err != nil {
+		t.Fatal(err)
+	}
+	if passenger.lifecycle.state() != PlayerLifeStateSpawned || !passenger.lifecycle.spawned || passenger.inVehicle {
+		t.Fatalf("passenger was killed by vehicle death: %+v", passenger.lifecycle)
+	}
+}
+
+func TestVehicleRemovalDetachesLocalDriver(t *testing.T) {
+	c := &Client{
+		lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned},
+		inVehicle: true, vehicleID: 9, health: 100,
+		vehicles: map[uint16]VehicleEvent{9: {ID: 9, ModelID: 441, Health: 1000}},
+	}
+	payload := raknet.Writer{}
+	payload.Uint16(9)
+	if _, err := c.decodeRPC(raknet.RPC{ID: RPCWorldVehicleRemove, Payload: payload.Bytes(), PayloadBits: payload.LenBits()}); err != nil {
+		t.Fatal(err)
+	}
+	if c.lifecycle.state() != PlayerLifeStateSpawned || !c.lifecycle.spawned || c.inVehicle || c.vehicleID != 0 {
+		t.Fatalf("vehicle removal changed player lifecycle: %+v inVehicle:%v vehicleID:%d", c.lifecycle, c.inVehicle, c.vehicleID)
+	}
+	pending := c.drainPendingEvents()
+	if len(pending) != 1 || pending[0].Type != EventVehicleState || pending[0].Data.(VehicleStateEvent).InVehicle {
+		t.Fatalf("vehicle removal events = %+v", pending)
+	}
+}
+
+func TestLifecycleStateEventsCoverReadyAndSpawned(t *testing.T) {
+	c := &Client{lifecycle: newPlayerLifecycle()}
+	c.setSpawnInfo(SpawnInfo{Position: [3]float32{1, 2, 3}, Skin: 7})
+	spawned := c.drainPendingEvents()
+	if len(spawned) != 1 || spawned[0].Type != EventPlayerLifeState || spawned[0].Data.(PlayerLifeStateEvent).State != PlayerLifeStateSpawnReady {
+		t.Fatalf("spawn-ready events = %+v", spawned)
+	}
+
+	c.markSpawned()
+	spawned = c.drainPendingEvents()
+	if len(spawned) != 1 || spawned[0].Type != EventPlayerLifeState || spawned[0].Data.(PlayerLifeStateEvent).State != PlayerLifeStateSpawned {
+		t.Fatalf("spawned lifecycle events = %+v", spawned)
+	}
+}
+
+func TestPutPlayerInVehicleIsIgnoredBeforeSpawn(t *testing.T) {
+	w := raknet.Writer{}
+	w.Uint16(42)
+	w.Uint8(0)
+	event, err := (&Client{lifecycle: playerLifecycle{lifeState: PlayerLifeStateDead}}).decodeRPC(raknet.RPC{ID: RPCPutPlayerInVehicle, Payload: w.Bytes(), PayloadBits: w.LenBits()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event != nil {
+		t.Fatalf("unexpected vehicle event before spawn: %+v", event)
+	}
+}
+
+func TestEnterVehicleRequiresSpawn(t *testing.T) {
+	c := &Client{vehicles: map[uint16]VehicleEvent{42: {ID: 42}}}
+	if err := c.EnterVehicle(context.Background(), 42, false, VehicleEntryDirect); !errors.Is(err, ErrClientNotSpawned) {
+		t.Fatalf("entry before spawn error = %v, want %v", err, ErrClientNotSpawned)
+	}
+}
+
+func TestMarkSpawnedClearsPreviousSpawnRequest(t *testing.T) {
+	c := &Client{
+		lifecycle: playerLifecycle{
+			spawnRequested: true, spawnRequestOrigin: PlayerLifeStateDead,
+			lifeState: PlayerLifeStateSpawnRequestPending, spawnPhase: spawnPhaseRequesting,
+		},
+		health: 0,
+		armour: 40,
+	}
+	spawned := c.markSpawned()
+	if !c.lifecycle.spawned || c.lifecycle.spawnRequested || c.lifecycle.state() != PlayerLifeStateSpawned || c.lifecycle.deathReported {
+		t.Fatalf("spawn state = spawned:%v requested:%v lifeState:%q reported:%v", c.lifecycle.spawned, c.lifecycle.spawnRequested, c.lifecycle.state(), c.lifecycle.deathReported)
+	}
+	if spawned.Health != defaultPlayerHealthValue || spawned.Armour != 0 {
+		t.Fatalf("spawn health = %+v", spawned)
+	}
+}
+
+func TestDeathNotificationPayloadUsesUnknownKillerSentinel(t *testing.T) {
+	payload := encodeDeathNotificationPayload(UnknownDeathReason, InvalidSAMPPlayerID)
+	if len(payload) != 3 || payload[0] != UnknownDeathReason || payload[1] != 0xff || payload[2] != 0xff {
+		t.Fatalf("death payload = %v", payload)
+	}
+}
+
+func TestUnknownDeathNotificationDoesNotSendFistReason(t *testing.T) {
+	var wirePayload []byte
+	c := &Client{
+		lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned},
+		rpcSender: func(_ context.Context, id uint8, payload []byte, _ int, _ raknet.Reliability) error {
+			if id == RPCDeath {
+				wirePayload = append([]byte(nil), payload...)
+			}
+			return nil
+		},
+	}
+	c.markDead(DeathSourceServerHealth)
+	if want := encodeDeathNotificationPayload(UnknownDeathReason, InvalidSAMPPlayerID); string(wirePayload) != string(want) {
+		t.Fatalf("unknown death notification payload = %v, want %v", wirePayload, want)
+	}
+}
+
+func TestNativeDeathCauseIsPreservedInEventAndNotification(t *testing.T) {
+	var wirePayload []byte
+	c := &Client{
+		lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned},
+		rpcSender: func(_ context.Context, id uint8, payload []byte, _ int, _ raknet.Reliability) error {
+			if id != RPCDeath {
+				t.Fatalf("death notification RPC = %d, want %d", id, RPCDeath)
+			}
+			wirePayload = append([]byte(nil), payload...)
+			return nil
+		},
+	}
+	c.markDeadWithCause(DeathSourceVehicle, DeathCause{Reason: 24, KillerID: 7, ReasonKnown: true})
+
+	if want := encodeDeathNotificationPayload(24, 7); string(wirePayload) != string(want) {
+		t.Fatalf("death notification payload = %v, want %v", wirePayload, want)
+	}
+	pending := c.drainPendingEvents()
+	if len(pending) != 2 {
+		t.Fatalf("death events = %+v", pending)
+	}
+	death := pending[1].Data.(PlayerDeathEvent)
+	if death.Reason != 24 || death.KillerID != 7 || !death.ReasonKnown || death.Source != DeathSourceVehicle {
+		t.Fatalf("native death event = %+v", death)
+	}
+}
+
+func TestAutomaticRespawnCompletesRequestResponseHandshake(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	spawned := make(chan struct{})
+	var c *Client
+	c = &Client{
+		ctx:           ctx,
+		respawnPolicy: RespawnPolicyAutomatic,
+		lifecycle: playerLifecycle{
+			lifeState:      PlayerLifeStateDead,
+			spawnInfoReady: true,
+		},
+		rpcSender: func(_ context.Context, id uint8, _ []byte, _ int, _ raknet.Reliability) error {
+			if id == RPCRequestSpawn {
+				if _, err := c.decodeRPC(raknet.RPC{ID: RPCRequestSpawn, Payload: []byte{1}, PayloadBits: 8}); err != nil {
+					return err
+				}
+			}
+			if id == RPCSpawn {
+				close(spawned)
+			}
+			return nil
+		},
+	}
+	c.startAutomaticSpawn()
+	startedAt := time.Now()
+	select {
+	case <-spawned:
+	case <-time.After(4 * time.Second):
+		t.Fatal("automatic respawn did not complete")
+	}
+	if elapsed := time.Since(startedAt); elapsed < autoRespawnAfterDeathDelay {
+		t.Fatalf("automatic respawn started after %s, want at least %s", elapsed, autoRespawnAfterDeathDelay)
+	}
+	c.stateMu.RLock()
+	state, isSpawned := c.lifecycle.state(), c.lifecycle.spawned
+	c.stateMu.RUnlock()
+	if state != PlayerLifeStateSpawned || !isSpawned {
+		t.Fatalf("automatic respawn lifecycle = state:%q spawned:%v", state, isSpawned)
+	}
+}
+
 func TestVehicleHealthRPCsUpdateStreamedAndCurrentVehicle(t *testing.T) {
 	c := &Client{
 		vehicles:  map[uint16]VehicleEvent{7: {ID: 7, ModelID: 411, X: 1, Health: 1000}},
@@ -273,22 +535,22 @@ func TestVehicleHealthRPCsUpdateStreamedAndCurrentVehicle(t *testing.T) {
 	if event.Data.(VehicleHealthEvent).Health != 0 || c.vehicles[7].Health != 0 || c.vehicleHealth != 0 {
 		t.Fatalf("vehicle death did not clear health: event=%+v vehicle=%+v current=%v", event, c.vehicles[7], c.vehicleHealth)
 	}
-	if !c.vehicleHealthKnown {
-		t.Fatal("vehicle death must keep the current vehicle health marked as known")
+	if c.vehicleHealthKnown || c.inVehicle {
+		t.Fatal("vehicle death must detach the current vehicle and clear local health state")
 	}
 }
 
 func TestMarkSpawnedResetsLocalHealth(t *testing.T) {
-	c := &Client{health: 0, armour: 55, spawned: false}
+	c := &Client{health: 0, armour: 55, lifecycle: playerLifecycle{lifeState: PlayerLifeStateClassSelection}}
 	event := c.markSpawned()
-	if !c.spawned || c.health != defaultPlayerHealthValue || c.armour != 0 {
-		t.Fatalf("spawn state = spawned:%v health:%v armour:%v", c.spawned, c.health, c.armour)
+	if !c.lifecycle.spawned || c.health != defaultPlayerHealthValue || c.armour != 0 {
+		t.Fatalf("spawn state = spawned:%v health:%v armour:%v", c.lifecycle.spawned, c.health, c.armour)
 	}
 	if event.Health != defaultPlayerHealthValue || event.Armour != 0 {
 		t.Fatalf("spawn event = %+v", event)
 	}
 
-	c = &Client{health: 72.5, armour: 18, spawned: false}
+	c = &Client{health: 72.5, armour: 18, lifecycle: playerLifecycle{lifeState: PlayerLifeStateClassSelection}}
 	event = c.markSpawned()
 	if event.Health != 72.5 || event.Armour != 18 {
 		t.Fatalf("server-provided spawn state was overwritten: %+v", event)
@@ -402,7 +664,7 @@ func TestDecodePutPlayerInVehicle(t *testing.T) {
 	w := raknet.Writer{}
 	w.Uint16(42)
 	w.Uint8(1)
-	event, err := (&Client{}).decodeRPC(raknet.RPC{ID: RPCPutPlayerInVehicle, Payload: w.Bytes(), PayloadBits: w.LenBits()})
+	event, err := (&Client{lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned}}).decodeRPC(raknet.RPC{ID: RPCPutPlayerInVehicle, Payload: w.Bytes(), PayloadBits: w.LenBits()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,6 +679,7 @@ func TestDecodePutPlayerInVehicle(t *testing.T) {
 
 func TestSetVehicleStateUsesStreamedVehicleTransform(t *testing.T) {
 	c := &Client{
+		lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned},
 		vehicles: map[uint16]VehicleEvent{
 			42: {ID: 42, X: 10, Y: -4, Z: 3, Angle: 90, Health: 875},
 		},
@@ -438,13 +701,13 @@ func TestSetVehicleStateUsesStreamedVehicleTransform(t *testing.T) {
 }
 
 func TestVehicleStateDistinguishesExplicitZeroFromUnknownHealth(t *testing.T) {
-	unknown := &Client{}
+	unknown := &Client{lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned}}
 	unknown.setVehicleState(42, 0)
 	if state := unknown.vehicleStateEvent(42, false); state.HasHealth {
 		t.Fatalf("unknown vehicle state = %+v", state)
 	}
 
-	knownZero := &Client{vehicles: map[uint16]VehicleEvent{42: {ID: 42, Health: 0}}}
+	knownZero := &Client{lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned}, vehicles: map[uint16]VehicleEvent{42: {ID: 42, Health: 0}}}
 	knownZero.setVehicleState(42, 0)
 	if state := knownZero.vehicleStateEvent(42, false); !state.HasHealth || state.Health != 0 {
 		t.Fatalf("known zero vehicle state = %+v", state)
@@ -488,7 +751,8 @@ func TestVehicleEntryModes(t *testing.T) {
 
 func TestNormalVehicleEntryRequiresAStreamedNearbyVehicle(t *testing.T) {
 	c := &Client{
-		position: [3]float32{0, 0, 0},
+		lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned},
+		position:  [3]float32{0, 0, 0},
 		vehicles: map[uint16]VehicleEvent{
 			42: {ID: 42, X: 20, Y: 0, Z: 0},
 		},
@@ -511,6 +775,23 @@ func TestRejectedRequestClassDoesNotRequireSpawnInfo(t *testing.T) {
 	}
 }
 
+func TestRejectedRequestClassClearsStaleSpawnState(t *testing.T) {
+	c := &Client{lifecycle: playerLifecycle{
+		lifeState:      PlayerLifeStateSpawnReady,
+		spawnInfoReady: true,
+	}}
+	event, err := c.decodeRPC(raknet.RPC{ID: RPCRequestClass, Payload: []byte{0}, PayloadBits: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event == nil || event.Type != EventPlayerLifeState || event.Data.(PlayerLifeStateEvent).State != PlayerLifeStateClassSelection {
+		t.Fatalf("class rejection event = %+v", event)
+	}
+	if c.lifecycle.spawnInfoReady || c.lifecycle.state() != PlayerLifeStateClassSelection {
+		t.Fatalf("class rejection left stale lifecycle: %+v", c.lifecycle)
+	}
+}
+
 func TestRequestClassDoesNotAutomaticallyRequestSpawn(t *testing.T) {
 	w := raknet.Writer{}
 	w.Uint8(1)
@@ -525,7 +806,7 @@ func TestRequestClassDoesNotAutomaticallyRequestSpawn(t *testing.T) {
 	if _, err := c.decodeRPC(raknet.RPC{ID: RPCRequestClass, Payload: w.Bytes(), PayloadBits: w.LenBits()}); err != nil {
 		t.Fatal(err)
 	}
-	if c.spawnRequested {
+	if c.lifecycle.spawnRequested {
 		t.Fatal("class response automatically requested spawn")
 	}
 }
@@ -537,14 +818,189 @@ func TestRequestSpawnRequiresSpawnInfo(t *testing.T) {
 	}
 }
 
+func TestRequestSpawnRespectsDeathCooldown(t *testing.T) {
+	rpcCalls := 0
+	c := &Client{
+		lifecycle: playerLifecycle{
+			lifeState:        PlayerLifeStateDead,
+			spawnInfoReady:   true,
+			respawnNotBefore: time.Now().Add(time.Second),
+		},
+		rpcSender: func(context.Context, uint8, []byte, int, raknet.Reliability) error {
+			rpcCalls++
+			return nil
+		},
+	}
+	if err := c.RequestSpawn(context.Background()); !errors.Is(err, ErrSpawnCooldown) {
+		t.Fatalf("RequestSpawn error = %v, want %v", err, ErrSpawnCooldown)
+	}
+	if rpcCalls != 0 || c.lifecycle.spawnPhase != spawnPhaseIdle || c.lifecycle.state() != PlayerLifeStateDead {
+		t.Fatalf("cooldown request changed lifecycle: calls:%d lifecycle:%+v", rpcCalls, c.lifecycle)
+	}
+}
+
+func TestDeathInvalidatesAutomaticWorkerAndSetsCooldown(t *testing.T) {
+	c := &Client{
+		lifecycle: playerLifecycle{
+			lifeState:          PlayerLifeStateSpawned,
+			spawned:            true,
+			autoRespawnEpoch:   7,
+			autoRespawnRunning: true,
+		},
+	}
+	startedAt := time.Now()
+	c.markDead(DeathSourceServerHealth)
+	if c.lifecycle.state() != PlayerLifeStateDead || c.lifecycle.autoRespawnEpoch != 8 || c.lifecycle.autoRespawnRunning {
+		t.Fatalf("death worker lifecycle = %+v", c.lifecycle)
+	}
+	if remaining := time.Until(c.lifecycle.respawnNotBefore); remaining < autoRespawnAfterDeathDelay-(time.Since(startedAt)) {
+		t.Fatalf("death cooldown = %s, want approximately %s", remaining, autoRespawnAfterDeathDelay)
+	}
+}
+
+func TestResetGameplayStateInvalidatesPreviousAutomaticWorker(t *testing.T) {
+	c := &Client{lifecycle: playerLifecycle{autoRespawnEpoch: 7, autoRespawnRunning: true}}
+	c.resetGameplayState()
+	if c.lifecycle.autoRespawnEpoch != 8 || c.lifecycle.autoRespawnRunning || c.lifecycle.state() != PlayerLifeStateClassSelection {
+		t.Fatalf("reset worker lifecycle = %+v", c.lifecycle)
+	}
+}
+
+func TestRequestSpawnAfterDeathStartsServerHandshake(t *testing.T) {
+	var rpcIDs []uint8
+	c := &Client{
+		ctx: context.Background(),
+		lifecycle: playerLifecycle{
+			lifeState:          PlayerLifeStateDead,
+			spawnInfoReady:     true,
+			deathReported:      true,
+			spawnRequestOrigin: PlayerLifeStateDead,
+		},
+		rpcSender: func(_ context.Context, id uint8, _ []byte, _ int, _ raknet.Reliability) error {
+			rpcIDs = append(rpcIDs, id)
+			return nil
+		},
+	}
+	if err := c.RequestSpawn(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(rpcIDs) != 1 || rpcIDs[0] != RPCRequestSpawn {
+		t.Fatalf("respawn RPCs = %v, want [%d]", rpcIDs, RPCRequestSpawn)
+	}
+	if c.lifecycle.spawned || c.lifecycle.state() != PlayerLifeStateSpawnRequestPending || c.lifecycle.spawnPhase != spawnPhaseRequesting {
+		t.Fatalf("respawn lifecycle = %+v", c.lifecycle)
+	}
+}
+
+func TestRespawnRequestWriteFailureRestoresDeadState(t *testing.T) {
+	wantErr := errors.New("spawn write failed")
+	c := &Client{
+		ctx: context.Background(),
+		lifecycle: playerLifecycle{
+			lifeState:      PlayerLifeStateDead,
+			spawnInfoReady: true,
+			deathReported:  true,
+		},
+		rpcSender: func(context.Context, uint8, []byte, int, raknet.Reliability) error {
+			return wantErr
+		},
+	}
+	if err := c.RequestSpawn(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("direct respawn error = %v, want %v", err, wantErr)
+	}
+	if c.lifecycle.state() != PlayerLifeStateDead || c.lifecycle.spawned || c.lifecycle.spawnPhase != spawnPhaseIdle {
+		t.Fatalf("failed respawn lifecycle = %+v", c.lifecycle)
+	}
+}
+
 func TestOrdinaryRequestSpawnOutcomeDoesNotForceSpawn(t *testing.T) {
 	c := &Client{}
 	event, err := c.decodeRPC(raknet.RPC{ID: RPCRequestSpawn, Payload: []byte{1}, PayloadBits: 8})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if event != nil || c.spawned {
-		t.Fatalf("ordinary outcome forced spawn: event=%+v spawned=%v", event, c.spawned)
+	if event != nil || c.lifecycle.spawned {
+		t.Fatalf("ordinary outcome forced spawn: event=%+v spawned=%v", event, c.lifecycle.spawned)
+	}
+}
+
+func TestRejectedRespawnRestoresDeadState(t *testing.T) {
+	c := &Client{
+		lifecycle: playerLifecycle{
+			spawnRequested: true, spawnRequestOrigin: PlayerLifeStateDead,
+			lifeState: PlayerLifeStateSpawnRequestPending, spawnPhase: spawnPhaseRequesting,
+		},
+	}
+	event, err := c.decodeRPC(raknet.RPC{ID: RPCRequestSpawn, Payload: []byte{0}, PayloadBits: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event == nil || event.Type != EventPlayerLifeState || c.lifecycle.spawnRequested || c.lifecycle.state() != PlayerLifeStateDead {
+		t.Fatalf("rejected respawn state = event:%+v requested:%v lifeState:%q", event, c.lifecycle.spawnRequested, c.lifecycle.state())
+	}
+}
+
+func TestSpawnRequestTimeoutRestoresOrigin(t *testing.T) {
+	c := &Client{lifecycle: playerLifecycle{
+		lifeState:          PlayerLifeStateSpawnRequestPending,
+		spawnRequested:     true,
+		spawnRequestOrigin: PlayerLifeStateDead,
+		spawnPhase:         spawnPhaseRequesting,
+		spawnRequestAt:     time.Now().Add(-spawnRequestTimeout - time.Second),
+	}}
+	c.expireSpawnRequest(time.Now())
+	if c.lifecycle.spawnRequested || c.lifecycle.spawnPhase != spawnPhaseIdle || c.lifecycle.state() != PlayerLifeStateDead {
+		t.Fatalf("expired spawn request state = %+v", c.lifecycle)
+	}
+	pending := c.drainPendingEvents()
+	if len(pending) != 1 || pending[0].Type != EventPlayerLifeState || pending[0].Data.(PlayerLifeStateEvent).State != PlayerLifeStateDead {
+		t.Fatalf("expired spawn request events = %+v", pending)
+	}
+}
+
+func TestSpawnRPCFailureRestoresOrigin(t *testing.T) {
+	wantErr := errors.New("spawn write failed")
+	c := &Client{
+		ctx: context.Background(),
+		lifecycle: playerLifecycle{
+			lifeState:          PlayerLifeStateSpawnRequestPending,
+			spawnRequested:     true,
+			spawnRequestOrigin: PlayerLifeStateDead,
+			spawnPhase:         spawnPhaseRequesting,
+		},
+		rpcSender: func(context.Context, uint8, []byte, int, raknet.Reliability) error {
+			return wantErr
+		},
+	}
+	_, err := c.decodeRPC(raknet.RPC{ID: RPCRequestSpawn, Payload: []byte{1}, PayloadBits: 8})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("spawn write error = %v, want %v", err, wantErr)
+	}
+	if c.lifecycle.spawnPhase != spawnPhaseIdle || c.lifecycle.spawnRequested || c.lifecycle.state() != PlayerLifeStateDead {
+		t.Fatalf("spawn write failure state = %+v", c.lifecycle)
+	}
+}
+
+func TestDeathNotificationRetriesAfterWriteFailure(t *testing.T) {
+	wantErr := errors.New("death write failed")
+	attempts := 0
+	c := &Client{
+		lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned},
+		rpcSender: func(context.Context, uint8, []byte, int, raknet.Reliability) error {
+			attempts++
+			if attempts == 1 {
+				return wantErr
+			}
+			return nil
+		},
+	}
+	c.markDead(DeathSourceServerHealth)
+	if attempts != 1 || !c.lifecycle.deathReportPending || !c.lifecycle.deathReported {
+		t.Fatalf("initial death report state = attempts:%d lifecycle:%+v", attempts, c.lifecycle)
+	}
+	c.retryDeathNotification(time.Now().Add(2 * deathNotificationRetry))
+	if attempts != 2 || c.lifecycle.deathReportPending {
+		t.Fatalf("retried death report state = attempts:%d lifecycle:%+v", attempts, c.lifecycle)
 	}
 }
 
@@ -563,7 +1019,14 @@ func TestInitGameOnlyInitializesLocalState(t *testing.T) {
 	w.Uint16(42)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	c := &Client{ctx: ctx, spawned: true, spawnRequested: true}
+	c := &Client{
+		ctx:       ctx,
+		lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned, spawnRequested: true},
+		vehicles:  map[uint16]VehicleEvent{9: {ID: 9}},
+		inVehicle: true, vehicleID: 9, vehicleHealthKnown: true,
+		keyMask: 7, enterPending: true,
+		pendingEvents: []Event{{Type: EventPlayerDeath}},
+	}
 	event, err := c.decodeRPC(raknet.RPC{ID: RPCInitGame, Payload: w.Bytes(), PayloadBits: w.LenBits()})
 	if err != nil {
 		t.Fatal(err)
@@ -571,8 +1034,12 @@ func TestInitGameOnlyInitializesLocalState(t *testing.T) {
 	if event == nil || event.Type != EventJoined || event.Data.(PlayerEvent).ID != 42 {
 		t.Fatalf("unexpected init event: %+v", event)
 	}
-	if c.spawned || c.spawnRequested || c.localID != 42 {
+	if c.lifecycle.spawned || c.lifecycle.spawnRequested || c.localID != 42 || c.inVehicle || c.vehicleID != 0 || c.keyMask != 0 || c.enterPending || len(c.vehicles) != 0 {
 		t.Fatalf("unexpected init state: %+v", c)
+	}
+	pending := c.drainPendingEvents()
+	if len(pending) != 1 || pending[0].Type != EventPlayerLifeState || pending[0].Data.(PlayerLifeStateEvent).State != PlayerLifeStateClassSelection {
+		t.Fatalf("init lifecycle events = %+v", pending)
 	}
 }
 
@@ -585,8 +1052,220 @@ func TestInitialClassFallbackOnlyRunsWithoutServerDrivenInitialization(t *testin
 	if c.shouldRequestInitialClass() {
 		t.Fatal("server-driven initialization must suppress the class fallback")
 	}
-	c = &Client{spawned: true}
+	c = &Client{lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned}}
 	if c.shouldRequestInitialClass() {
 		t.Fatal("a spawned client must suppress the class fallback")
 	}
+}
+
+func TestAsyncDeathFlushesEventsWithoutInboundRPC(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := &Client{
+		ctx:       ctx,
+		cancel:    cancel,
+		events:    make(chan Event, 8),
+		lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned},
+		health:    100,
+	}
+	c.initEventDispatcher()
+	c.NotifyLocalPlayerDeath(DeathSourceVehicle)
+
+	select {
+	case event := <-c.events:
+		if event.Type != EventPlayerLifeState || event.Data.(PlayerLifeStateEvent).State != PlayerLifeStateDead {
+			t.Fatalf("first async death event = %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for async lifecycle event")
+	}
+	select {
+	case event := <-c.events:
+		if event.Type != EventPlayerDeath || event.Data.(PlayerDeathEvent).Source != DeathSourceVehicle {
+			t.Fatalf("second async death event = %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for async death event")
+	}
+	c.stopEventDispatcher(nil)
+}
+
+func TestTerminalEventSurvivesFullEventBuffer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := &Client{ctx: ctx, events: make(chan Event, 1)}
+	c.initEventDispatcher()
+	c.emit(Event{Type: EventChat, Data: ChatEvent{Text: "stale"}})
+
+	deadline := time.After(time.Second)
+	for len(c.events) == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("dispatcher did not fill the event buffer")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	c.stopEventDispatcher(&Event{Type: EventDisconnected, Data: errors.New("closed")})
+
+	deadline = time.After(time.Second)
+	for {
+		select {
+		case event, ok := <-c.events:
+			if !ok {
+				t.Fatal("event channel closed before terminal event")
+			}
+			if event.Type == EventDisconnected {
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for terminal event")
+		}
+	}
+}
+
+func TestRejectClassSelectionClearsVehicleEntryTransaction(t *testing.T) {
+	c := &Client{
+		lifecycle:    playerLifecycle{lifeState: PlayerLifeStateSpawnReady, spawnInfoReady: true},
+		enterPending: true, enterPendingVehicle: 7, enterPendingMode: VehicleEntryNormal,
+		enterQueued: true, enterQueuedVehicle: 9, enterQueuedMode: VehicleEntryDirect,
+	}
+	if event := c.rejectClassSelection(); event == nil {
+		t.Fatal("class selection rejection did not emit a lifecycle event")
+	}
+	if c.enterPending || c.enterQueued || c.exitPending || c.inVehicle || c.vehicleHealthKnown {
+		t.Fatalf("stale vehicle transaction after class rejection: %+v", c)
+	}
+}
+
+func TestSetOnFootPositionClearsVehicleTransientState(t *testing.T) {
+	c := &Client{
+		inVehicle: true, vehicleID: 7, vehicleHealth: 450, vehicleHealthKnown: true,
+		vehicleVelocity: [3]float32{1, 2, 3}, vehicleQuaternion: [4]float32{1, 0, 0, 0},
+		vehicleLRAnalog: 10, vehicleUDAnalog: 20, vehicleProtocolKeys: 30,
+	}
+	c.setOnFootPosition([3]float32{4, 5, 6})
+	if c.inVehicle || c.vehicleID != 0 || c.vehicleHealth != 0 || c.vehicleHealthKnown || c.vehicleVelocity != [3]float32{} || c.vehicleQuaternion != [4]float32{} || c.vehicleLRAnalog != 0 || c.vehicleUDAnalog != 0 || c.vehicleProtocolKeys != 0 {
+		t.Fatalf("vehicle transient state after on-foot reset: %+v", c)
+	}
+}
+
+func TestVehicleDestructionCancelsPendingEntry(t *testing.T) {
+	c := &Client{
+		lifecycle:           playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned},
+		vehicles:            map[uint16]VehicleEvent{7: {ID: 7, Health: 1000}},
+		enterPending:        true,
+		enterPendingID:      11,
+		enterPendingVehicle: 7,
+		enterPendingMode:    VehicleEntryNormal,
+		enterQueued:         true,
+		enterQueuedVehicle:  7,
+		enterQueuedMode:     VehicleEntryDirect,
+	}
+	c.applyServerVehicleHealth(7, 0, DeathSourceVehicle)
+	if c.enterPending || c.enterPendingID != 0 || c.enterQueued || c.inVehicle {
+		t.Fatalf("destroyed vehicle left entry transaction active: %+v", c)
+	}
+	if _, ok := c.vehicles[7]; !ok {
+		t.Fatal("vehicle health update unexpectedly removed vehicle record")
+	}
+}
+
+func TestVehicleEntryCommitRejectsStaleTokenOrRemovedVehicle(t *testing.T) {
+	c := &Client{
+		lifecycle:           playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned},
+		vehicles:            map[uint16]VehicleEvent{7: {ID: 7, Health: 1000}},
+		enterPending:        true,
+		enterPendingID:      11,
+		enterPendingVehicle: 7,
+		enterPendingMode:    VehicleEntryNormal,
+	}
+	if c.completeVehicleEntry(7, false, VehicleEntryNormal, 10, 0) {
+		t.Fatal("stale vehicle entry token was committed")
+	}
+	delete(c.vehicles, 7)
+	if c.completeVehicleEntry(7, false, VehicleEntryNormal, 11, 0) {
+		t.Fatal("removed vehicle was committed")
+	}
+	if c.inVehicle || c.enterPending {
+		t.Fatalf("stale entry state after rejected commit: %+v", c)
+	}
+}
+
+func TestDirectVehicleEntryDoesNotCommitRemovedKnownVehicle(t *testing.T) {
+	c := &Client{
+		lifecycle:           playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned},
+		vehicles:            map[uint16]VehicleEvent{7: {ID: 7, Health: 1000}},
+		enterPending:        true,
+		enterPendingID:      11,
+		enterPendingVehicle: 7,
+		enterPendingMode:    VehicleEntryDirect,
+		enterPendingKnown:   true,
+	}
+	delete(c.vehicles, 7)
+	if c.completeVehicleEntry(7, false, VehicleEntryDirect, 11, 0) {
+		t.Fatal("direct entry committed a removed known vehicle")
+	}
+}
+
+func TestQueuedKnownVehicleEntryRejectsRemovedTargetBeforeRPC(t *testing.T) {
+	calls := 0
+	c := &Client{
+		lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned},
+		rpcSender: func(context.Context, uint8, []byte, int, raknet.Reliability) error {
+			calls++
+			return nil
+		},
+	}
+	known := true
+	if err := c.enterVehicle(context.Background(), 7, false, VehicleEntryDirect, &known); !errors.Is(err, ErrVehicleEntryCanceled) {
+		t.Fatalf("queued known target error = %v, want %v", err, ErrVehicleEntryCanceled)
+	}
+	if calls != 0 {
+		t.Fatalf("removed queued target still sent an entry RPC: %d", calls)
+	}
+}
+
+func TestStaleVehicleEntryCancellationCannotClearNewTransaction(t *testing.T) {
+	c := &Client{
+		enterPending:        true,
+		enterPendingID:      2,
+		enterPendingVehicle: 7,
+		enterPendingMode:    VehicleEntryNormal,
+	}
+	c.cancelPendingVehicleEntry(1, 7, false, VehicleEntryNormal)
+	if !c.enterPending || c.enterPendingID != 2 {
+		t.Fatalf("stale cancellation cleared the new entry transaction: %+v", c)
+	}
+	c.cancelPendingVehicleEntry(2, 7, false, VehicleEntryNormal)
+	if c.enterPending || c.enterPendingID != 0 {
+		t.Fatalf("matching cancellation left the entry transaction active: %+v", c)
+	}
+}
+
+func TestQueuedVehicleEntryContinuationDoesNotBlockCaller(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	c := &Client{
+		ctx:       ctx,
+		lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned},
+		rpcSender: func(context.Context, uint8, []byte, int, raknet.Reliability) error {
+			close(started)
+			<-release
+			return errors.New("cancel queued test")
+		},
+	}
+	startedAt := time.Now()
+	c.continueQueuedVehicleEntry(7, false, VehicleEntryDirect, false, true)
+	select {
+	case <-started:
+		if time.Since(startedAt) > 100*time.Millisecond {
+			t.Fatal("queued vehicle continuation blocked the caller")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queued vehicle continuation did not start")
+	}
+	close(release)
 }

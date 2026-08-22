@@ -47,6 +47,15 @@ const (
 	InvalidVehicleID       = -1
 )
 
+const (
+	LifeStateClassSelection      = "class_selection"
+	LifeStateSpawnReady          = "spawn_ready"
+	LifeStateSpawnRequestPending = "spawn_request_pending"
+	LifeStateSpawned             = "spawned"
+	LifeStateDead                = "dead"
+	LifeStateDisconnected        = "disconnected"
+)
+
 type Server struct {
 	ID                   string   `json:"id"`
 	Host                 string   `json:"host"`
@@ -143,9 +152,10 @@ type VehicleState struct {
 	HealthKnown bool    `json:"healthKnown"`
 }
 type LocalPlayer struct {
-	ID     int     `json:"id"`
-	Health float32 `json:"health"`
-	Armour float32 `json:"armour"`
+	ID        int     `json:"id"`
+	Health    float32 `json:"health"`
+	Armour    float32 `json:"armour"`
+	LifeState string  `json:"lifeState,omitempty"`
 }
 type Snapshot struct {
 	// Revision is incremented for every state update. Clients use it to detect

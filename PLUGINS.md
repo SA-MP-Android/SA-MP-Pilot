@@ -108,7 +108,7 @@ Every event delivered to a plugin has this shape:
 
 `instance.updated` operations currently replace top-level snapshot paths. A plugin should use `instance.getSnapshot()` as its recovery source when it misses events or does not want to implement patch application.
 
-Snapshots expose the local player's state as `localPlayer: { id, health, armour }`. When the client is driving or riding, `vehicleState` also includes the current vehicle's `health` and `healthKnown`; only use `health` when `healthKnown` is true. The matching entry in `vehicles` remains the complete vehicle record.
+Snapshots expose the local player's state as `localPlayer: { id, health, armour, lifeState }`. `lifeState` is one of `class_selection`, `spawn_ready`, `spawn_request_pending`, `spawned`, `dead`, or `disconnected`. When the client is driving or riding, `vehicleState` also includes the current vehicle's `health` and `healthKnown`; only use `health` when `healthKnown` is true. The matching entry in `vehicles` remains the complete vehicle record.
 
 ## Client events
 
@@ -135,6 +135,8 @@ All client payloads use camelCase. IDs inside entity payloads are named `id`; `p
 | `client.position` | `{ x, y, z }` |
 | `client.appearance` | `{ id, x?, y?, z?, skin?, team?, rotation?, color? }`; only fields present in the server update are included |
 | `client.player.health` | `{ health, armour }`; emitted when the server updates the local player's health or armour, and when a successful spawn resets the local state to the default values |
+| `client.player.state` | `{ state }`; emitted for lifecycle transitions such as `spawn_request_pending`, `spawn_ready`, and `spawned` |
+| `client.player.death` | `{ reason, killerId, reasonKnown, source }`; emitted once when a spawned local player enters the dead state. `reason` is `255` and `reasonKnown` is `false` when the authoritative update does not contain weapon metadata; `killerId` is `-1` when unknown. `source` is `server_health`, `vehicle`, or `rc_vehicle` depending on the death authority |
 | `client.vehicle.state` | `{ inVehicle, passenger, vehicleId, health, healthKnown }`; `vehicleId` is `-1` when not in a vehicle and `healthKnown` is false when the current vehicle's health is not known yet |
 | `client.vehicle.health` | `{ id, health }`; emitted for `SetVehicleHealth` and vehicle-death updates |
 | `client.spawned` | `{}` |
@@ -186,7 +188,7 @@ await instance.deleteCommand(commandId)
 
 Vehicle IDs are server entity IDs from `snapshot.vehicles[].id`, not GTA model IDs such as `411`. The vehicle should be streamed and within normal entry range before calling `enterVehicle` or `driveTo`.
 
-`instance.call(method, params)` is available for forward-compatible or generic calls. `instance.action(action, params)` supports the current UI actions `chat`, `spawn`, `keys`, `afk`, `teleport`, `enterVehicle`, `exitVehicle`, `walkTo`, `driveTo`, `stopMovement`, `dialog`, `textDraw`, `clickPlayer`, `deferDialog`, `showDialog`, and `dismissDialog`.
+`instance.call(method, params)` is available for forward-compatible or generic calls. `instance.action(action, params)` supports the current UI actions `chat`, `spawn`, `keys`, `afk`, `teleport`, `enterVehicle`, `exitVehicle`, `walkTo`, `driveTo`, `stopMovement`, `dialog`, `textDraw`, `clickPlayer`, `deferDialog`, `showDialog`, and `dismissDialog`. The application uses an explicit automatic-respawn policy for connected instances; plugins can react to `client.player.death` or `client.player.state` and call `instance.requestSpawn()` when they need to request or coordinate a spawn. A death-triggered spawn request is subject to the client's 2.5-second respawn cooldown.
 
 ### Instance management
 

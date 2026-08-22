@@ -57,7 +57,9 @@ export default {
   },
   status: {
     afk: 'AFK',
+    dead: 'Погиб',
     awaitingSpawn: 'Ожидание спавна',
+    spawnPending: 'Ожидание подтверждения спавна',
     passenger: 'Пассажир',
     driver: 'Водитель',
     vehicle: 'Транспорт #{{id}}',

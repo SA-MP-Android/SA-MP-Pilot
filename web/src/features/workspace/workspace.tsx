@@ -95,14 +95,18 @@ export function Workspace({
     if (value.activeDialog) setEditing(false)
   }, [value.activeDialog])
 
+  const localPlayer = value.localPlayer
   const stateLabel = value.afk
     ? t('status.afk')
-    : !value.spawned
-      ? t('status.awaitingSpawn')
-      : value.vehicleState.inVehicle
-        ? `${t(value.vehicleState.passenger ? 'status.passenger' : 'status.driver')} · ${t('status.vehicle', { id: value.vehicleState.vehicleId })}`
-        : t('status.onFoot')
-  const localPlayer = value.localPlayer
+    : localPlayer.lifeState === 'dead'
+      ? t('status.dead')
+      : localPlayer.lifeState === 'spawn_request_pending'
+        ? t('status.spawnPending')
+        : !value.spawned
+          ? t('status.awaitingSpawn')
+          : value.vehicleState.inVehicle
+            ? `${t(value.vehicleState.passenger ? 'status.passenger' : 'status.driver')} · ${t('status.vehicle', { id: value.vehicleState.vehicleId })}`
+            : t('status.onFoot')
   const currentVehicle = value.vehicleState.inVehicle
     ? value.vehicles.find((vehicle) => vehicle.id === value.vehicleState.vehicleId)
     : undefined

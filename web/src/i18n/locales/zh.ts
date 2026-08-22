@@ -57,7 +57,9 @@ export default {
   },
   status: {
     afk: 'AFK',
+    dead: '已死亡',
     awaitingSpawn: '等待生成',
+    spawnPending: '等待生成确认',
     passenger: '乘客',
     driver: '驾驶员',
     vehicle: '车辆 #{{id}}',

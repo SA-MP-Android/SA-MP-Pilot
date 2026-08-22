@@ -232,7 +232,7 @@ func (m *Manager) DeleteCommand(id, commandID string) error {
 	return nil
 }
 func newInstance(s domain.Server, syncEpoch string) *instance {
-	snapshot := domain.Snapshot{Revision: 1, SyncEpoch: syncEpoch, Server: s, Connection: domain.Connection{Status: domain.StatusDisconnected}, Chat: []domain.ChatMessage{}, Players: []domain.Player{}, NearbyPlayers: []domain.Player{}, Vehicles: []domain.Vehicle{}, Objects: []domain.Object{}, TextDraws: []domain.TextDraw{}, Dialogs: []domain.Dialog{}, Commands: []domain.QuickCommand{}, LocalPlayer: domain.LocalPlayer{ID: domain.InvalidPlayerID}, VehicleState: domain.VehicleState{VehicleID: domain.InvalidVehicleID}}
+	snapshot := domain.Snapshot{Revision: 1, SyncEpoch: syncEpoch, Server: s, Connection: domain.Connection{Status: domain.StatusDisconnected}, Chat: []domain.ChatMessage{}, Players: []domain.Player{}, NearbyPlayers: []domain.Player{}, Vehicles: []domain.Vehicle{}, Objects: []domain.Object{}, TextDraws: []domain.TextDraw{}, Dialogs: []domain.Dialog{}, Commands: []domain.QuickCommand{}, LocalPlayer: domain.LocalPlayer{ID: domain.InvalidPlayerID, LifeState: domain.LifeStateDisconnected}, VehicleState: domain.VehicleState{VehicleID: domain.InvalidVehicleID}}
 	return &instance{snap: snapshot, published: cloneSnapshot(snapshot), playerID: domain.InvalidPlayerID, dirty: make(chan struct{}, 1)}
 }
 func (m *Manager) List() []domain.Snapshot {
@@ -415,7 +415,10 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 		s.Nickname,
 		s.Password,
 		string(s.Encoding),
-		samp.ClientOptions{EmulatePCClientCheck: s.EmulatePCClientCheck},
+		samp.ClientOptions{
+			EmulatePCClientCheck: s.EmulatePCClientCheck,
+			RespawnPolicy:        samp.RespawnPolicyAutomatic,
+		},
 	)
 	if err != nil {
 		return err
@@ -439,7 +442,7 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 		case samp.EventJoined:
 			localPlayer := event.Data.(samp.PlayerEvent)
 			i.playerID = int(localPlayer.ID)
-			i.snap.LocalPlayer = domain.LocalPlayer{ID: i.playerID, Health: localPlayer.Health, Armour: localPlayer.Armour}
+			i.snap.LocalPlayer = domain.LocalPlayer{ID: i.playerID, Health: localPlayer.Health, Armour: localPlayer.Armour, LifeState: domain.LifeStateClassSelection}
 			i.snap.SpawnReady = false
 			i.snap.Players = upsertPlayer(i.snap.Players, domain.Player{ID: int(localPlayer.ID), Name: s.Nickname, Health: localPlayer.Health, Armour: localPlayer.Armour})
 			i.snap.Players = sortPlayers(i.snap.Players, i.playerID)
@@ -527,8 +530,7 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 			v := event.Data.(samp.VehicleEvent)
 			i.snap.Vehicles = removeVehicle(i.snap.Vehicles, int(v.ID))
 			if i.snap.VehicleState.InVehicle && i.snap.VehicleState.VehicleID == int(v.ID) {
-				i.snap.VehicleState.Health = 0
-				i.snap.VehicleState.HealthKnown = false
+				i.snap.VehicleState = domain.VehicleState{VehicleID: domain.InvalidVehicleID}
 			}
 		case samp.EventPlayerSync:
 			v := event.Data.(samp.PlayerEvent)
@@ -580,9 +582,14 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 			applyVehicleState(i, event.Data.(samp.VehicleStateEvent))
 		case samp.EventPlayerHealth:
 			applyLocalPlayerHealth(i, event.Data.(samp.PlayerHealthEvent))
+		case samp.EventPlayerLifeState:
+			applyLocalPlayerLifeState(i, event.Data.(samp.PlayerLifeStateEvent))
+		case samp.EventPlayerDeath:
+			applyLocalPlayerDeath(i)
 		case samp.EventSpawned:
 			i.snap.Spawned = true
 			i.snap.SpawnReady = false
+			i.snap.LocalPlayer.LifeState = domain.LifeStateSpawned
 			if v, ok := event.Data.(samp.SpawnedEvent); ok {
 				applyLocalPlayerHealth(i, samp.PlayerHealthEvent{Health: v.Health, Armour: v.Armour})
 			}
@@ -590,6 +597,9 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 			v := event.Data.(samp.PlayerEvent)
 			if int(v.ID) == i.playerID && v.HasPosition && v.HasSkin && v.HasTeam && v.HasRotation {
 				i.snap.SpawnReady = true
+				if !i.snap.Spawned && i.snap.LocalPlayer.LifeState != domain.LifeStateDead && i.snap.LocalPlayer.LifeState != domain.LifeStateSpawnRequestPending {
+					i.snap.LocalPlayer.LifeState = domain.LifeStateSpawnReady
+				}
 			}
 			player := findPlayer(i.snap.Players, int(v.ID))
 			player.ID = int(v.ID)
@@ -733,12 +743,50 @@ func removePlayerFromSnapshot(i *instance, id int) {
 	i.snap.NearbyPlayers = removePlayer(i.snap.NearbyPlayers, id)
 }
 func applyLocalPlayerHealth(i *instance, value samp.PlayerHealthEvent) {
-	i.snap.LocalPlayer = domain.LocalPlayer{ID: i.playerID, Health: value.Health, Armour: value.Armour}
+	lifeState := i.snap.LocalPlayer.LifeState
+	i.snap.LocalPlayer = domain.LocalPlayer{ID: i.playerID, Health: value.Health, Armour: value.Armour, LifeState: lifeState}
 	local := findPlayer(i.snap.Players, i.playerID)
 	local.ID, local.Health, local.Armour = i.playerID, value.Health, value.Armour
 	i.snap.Players = upsertPlayer(i.snap.Players, local)
 	i.snap.Players = sortPlayers(i.snap.Players, i.playerID)
 	updatePlayerHealth(i.snap.NearbyPlayers, i.playerID, value.Health, value.Armour)
+}
+
+func applyLocalPlayerLifeState(i *instance, value samp.PlayerLifeStateEvent) {
+	i.snap.LocalPlayer.LifeState = string(value.State)
+	switch value.State {
+	case samp.PlayerLifeStateClassSelection:
+		i.snap.Spawned = false
+		i.snap.SpawnReady = false
+	case samp.PlayerLifeStateSpawnReady, samp.PlayerLifeStateSpawnRequestPending:
+		i.snap.Spawned = false
+		i.snap.SpawnReady = true
+	case samp.PlayerLifeStateDead:
+		i.snap.Spawned = false
+		i.snap.SpawnReady = true
+		i.snap.KeyMask = 0
+		i.snap.VehicleState = domain.VehicleState{VehicleID: domain.InvalidVehicleID}
+	case samp.PlayerLifeStateSpawned:
+		i.snap.Spawned = true
+		i.snap.SpawnReady = false
+	case domain.LifeStateDisconnected:
+		i.snap.Spawned = false
+		i.snap.SpawnReady = false
+	}
+}
+
+func applyLocalPlayerDeath(i *instance) {
+	i.snap.Spawned = false
+	i.snap.SpawnReady = true
+	i.snap.KeyMask = 0
+	i.snap.LocalPlayer.Health = 0
+	i.snap.LocalPlayer.LifeState = domain.LifeStateDead
+	local := findPlayer(i.snap.Players, i.playerID)
+	local.ID, local.Health = i.playerID, 0
+	i.snap.Players = upsertPlayer(i.snap.Players, local)
+	i.snap.Players = sortPlayers(i.snap.Players, i.playerID)
+	updatePlayerHealth(i.snap.NearbyPlayers, i.playerID, 0, i.snap.LocalPlayer.Armour)
+	i.snap.VehicleState = domain.VehicleState{VehicleID: domain.InvalidVehicleID}
 }
 func updatePlayerHealth(players []domain.Player, id int, health, armour float32) {
 	for index := range players {
@@ -781,7 +829,7 @@ func resetConnectionState(i *instance) {
 	clear(i.snap.Dialogs)
 	i.snap.Dialogs = i.snap.Dialogs[:0]
 	i.snap.VehicleState = domain.VehicleState{VehicleID: domain.InvalidVehicleID}
-	i.snap.LocalPlayer = domain.LocalPlayer{ID: domain.InvalidPlayerID}
+	i.snap.LocalPlayer = domain.LocalPlayer{ID: domain.InvalidPlayerID, LifeState: domain.LifeStateDisconnected}
 	i.snap.KeyMask = 0
 	i.snap.AFK = false
 	i.snap.Spawned = false
@@ -1786,6 +1834,16 @@ func pluginEventData(event samp.Event) any {
 	case samp.EventPlayerHealth:
 		value := event.Data.(samp.PlayerHealthEvent)
 		return plugin.PlayerHealthEventData{Health: value.Health, Armour: value.Armour}
+	case samp.EventPlayerLifeState:
+		value := event.Data.(samp.PlayerLifeStateEvent)
+		return plugin.PlayerLifeStateEventData{State: string(value.State)}
+	case samp.EventPlayerDeath:
+		value := event.Data.(samp.PlayerDeathEvent)
+		killerID := -1
+		if value.KillerID != samp.InvalidSAMPPlayerID {
+			killerID = int(value.KillerID)
+		}
+		return plugin.PlayerDeathEventData{Reason: int(value.Reason), KillerID: killerID, ReasonKnown: value.ReasonKnown, Source: string(value.Source)}
 	case samp.EventVehicleState:
 		value := event.Data.(samp.VehicleStateEvent)
 		vehicleID := -1

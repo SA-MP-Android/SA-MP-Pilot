@@ -62,6 +62,8 @@ const (
 	EventClientPosition         = "client.position"
 	EventClientAppearance       = "client.appearance"
 	EventClientPlayerHealth     = "client.player.health"
+	EventClientPlayerLifeState  = "client.player.state"
+	EventClientPlayerDeath      = "client.player.death"
 	EventClientVehicleState     = "client.vehicle.state"
 	EventClientVehicleHealth    = "client.vehicle.health"
 	EventClientSpawned          = "client.spawned"
@@ -251,6 +253,17 @@ type PlayerSyncEventData struct {
 type PlayerHealthEventData struct {
 	Health float32 `json:"health"`
 	Armour float32 `json:"armour"`
+}
+
+type PlayerLifeStateEventData struct {
+	State string `json:"state"`
+}
+
+type PlayerDeathEventData struct {
+	Reason      int    `json:"reason"`
+	KillerID    int    `json:"killerId"`
+	ReasonKnown bool   `json:"reasonKnown"`
+	Source      string `json:"source"`
 }
 
 type PositionEventData struct {

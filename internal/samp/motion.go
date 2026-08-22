@@ -251,7 +251,7 @@ func (c *Client) startMotion(task motionTask) (uint64, error) {
 	c.motionMu.Lock()
 	c.stateMu.RLock()
 	position := c.position
-	spawned, afk := c.spawned, c.afk
+	spawned, afk := c.lifecycle.spawned, c.afk
 	inVehicle, passenger := c.inVehicle, c.passenger
 	c.stateMu.RUnlock()
 	if !spawned {
@@ -351,7 +351,7 @@ func (c *Client) advanceMotion(now time.Time) {
 		progress     float32
 	)
 	c.stateMu.Lock()
-	if !c.spawned || c.afk {
+	if !c.lifecycle.spawned || c.afk {
 		c.stateMu.Unlock()
 		c.motionMu.Unlock()
 		return

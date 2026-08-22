@@ -140,6 +140,23 @@ describe('Workspace quick commands', () => {
     expect(screen.getByRole('button', { name: 'Spawn' })).toBeTruthy()
   })
 
+  it('shows dead instead of awaiting spawn after a death transition', () => {
+    render(
+      <Workspace
+        value={{
+          ...snapshot,
+          activeDialog: null,
+          localPlayer: { ...snapshot.localPlayer, lifeState: 'dead' },
+          spawned: false,
+          spawnReady: true,
+        }}
+        onDelete={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('Dead')).toBeTruthy()
+    expect(screen.queryByText('Awaiting Spawn')).toBeNull()
+  })
+
   it('requires confirmation before deleting an instance command', async () => {
     const removeCommand = vi.spyOn(api, 'removeCommand').mockResolvedValue(undefined)
     render(

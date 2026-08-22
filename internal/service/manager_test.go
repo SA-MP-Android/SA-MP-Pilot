@@ -148,6 +148,43 @@ func TestApplyLocalPlayerHealthUpdatesCanonicalAndNearbyState(t *testing.T) {
 	}
 }
 
+func TestApplyLocalPlayerLifeStateKeepsRespawnPendingVisible(t *testing.T) {
+	i := &instance{snap: domain.Snapshot{
+		LocalPlayer: domain.LocalPlayer{ID: 7, LifeState: domain.LifeStateSpawnReady},
+		SpawnReady:  true,
+	}}
+	applyLocalPlayerLifeState(i, samp.PlayerLifeStateEvent{State: samp.PlayerLifeStateSpawnRequestPending})
+
+	if i.snap.Spawned || !i.snap.SpawnReady || i.snap.LocalPlayer.LifeState != domain.LifeStateSpawnRequestPending {
+		t.Fatalf("pending spawn state = %+v", i.snap)
+	}
+}
+
+func TestPlayerDeathMarksSnapshotDeadAndClearsVehicleState(t *testing.T) {
+	i := &instance{playerID: 7, snap: domain.Snapshot{
+		LocalPlayer:   domain.LocalPlayer{ID: 7, Health: 100, Armour: 25, LifeState: domain.LifeStateSpawned},
+		Players:       []domain.Player{{ID: 7, Health: 100, Armour: 25}},
+		NearbyPlayers: []domain.Player{{ID: 7, Health: 100, Armour: 25}},
+		Spawned:       true,
+		SpawnReady:    false,
+		KeyMask:       3,
+		VehicleState: domain.VehicleState{
+			InVehicle: true, VehicleID: 42, Health: 900, HealthKnown: true,
+		},
+	}}
+	applyLocalPlayerDeath(i)
+
+	if i.snap.Spawned || !i.snap.SpawnReady || i.snap.KeyMask != 0 || i.snap.LocalPlayer.LifeState != domain.LifeStateDead {
+		t.Fatalf("death snapshot = %+v", i.snap)
+	}
+	if i.snap.LocalPlayer.Health != 0 || findPlayer(i.snap.Players, 7).Health != 0 || findPlayer(i.snap.NearbyPlayers, 7).Health != 0 {
+		t.Fatalf("death health was not propagated: local=%+v players=%+v nearby=%+v", i.snap.LocalPlayer, i.snap.Players, i.snap.NearbyPlayers)
+	}
+	if i.snap.VehicleState.InVehicle || i.snap.VehicleState.VehicleID != domain.InvalidVehicleID {
+		t.Fatalf("vehicle state after death = %+v", i.snap.VehicleState)
+	}
+}
+
 func TestApplyVehicleStatePreservesKnownZeroHealth(t *testing.T) {
 	i := &instance{snap: domain.Snapshot{Vehicles: []domain.Vehicle{{ID: 42, Health: 900}}}}
 	applyVehicleState(i, samp.VehicleStateEvent{InVehicle: true, VehicleID: 42, Health: 0, HasHealth: true})
@@ -304,6 +341,26 @@ func TestPluginClientEventsUseStableCamelCasePayloads(t *testing.T) {
 	}
 	if got := string(encoded); got != `{"inVehicle":true,"passenger":false,"vehicleId":7,"health":0,"healthKnown":true}` {
 		t.Fatalf("vehicle state plugin payload = %s", got)
+	}
+
+	stateEvent := samp.Event{Type: samp.EventPlayerLifeState, Data: samp.PlayerLifeStateEvent{State: samp.PlayerLifeStateSpawnRequestPending}}
+	encoded, err = json.Marshal(pluginEventData(stateEvent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(encoded); got != `{"state":"spawn_request_pending"}` {
+		t.Fatalf("player state plugin payload = %s", got)
+	}
+
+	deathEvent := samp.Event{Type: samp.EventPlayerDeath, Data: samp.PlayerDeathEvent{
+		Reason: samp.UnknownDeathReason, KillerID: samp.InvalidSAMPPlayerID, ReasonKnown: false, Source: samp.DeathSourceServerHealth,
+	}}
+	encoded, err = json.Marshal(pluginEventData(deathEvent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(encoded); got != `{"reason":255,"killerId":-1,"reasonKnown":false,"source":"server_health"}` {
+		t.Fatalf("player death plugin payload = %s", got)
 	}
 }
 

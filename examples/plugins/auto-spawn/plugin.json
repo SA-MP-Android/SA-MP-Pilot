@@ -5,7 +5,11 @@
   "description": "Automatically spawns every connected instance and logs chat.",
   "command": "node",
   "args": ["main.mjs"],
-  "events": ["instance.created", "client.appearance", "client.chat"],
+  "events": [
+    "instance.created",
+    "client.appearance",
+    "client.chat"
+  ],
   "enabled": true,
   "restart": true
 }

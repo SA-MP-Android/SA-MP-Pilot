@@ -24,6 +24,7 @@ const (
 	maxDialogMessageBytes         = 4096
 	packetAuthKey          uint8  = 12
 	RPCClientJoin          uint8  = 25
+	RPCDeath               uint8  = 53
 	RPCRequestClass        uint8  = 128
 	RPCRequestSpawn        uint8  = 129
 	RPCSpawn               uint8  = 52
@@ -102,18 +103,32 @@ const (
 	onFootPayloadBytes    = 69
 )
 
+// RespawnPolicy controls who drives the spawn transaction after class data or
+// death is available. The protocol client remains usable in manual mode, while
+// the application can opt into Android-like automatic spawning.
+type RespawnPolicy uint8
+
+const (
+	RespawnPolicyManual RespawnPolicy = iota
+	RespawnPolicyAutomatic
+)
+
 // ClientOptions controls compatibility behavior that is optional in the
 // Android raksamp client. In particular, PC client-check emulation is off by
 // default there and must not be advertised unless explicitly requested.
 type ClientOptions struct {
 	EmulatePCClientCheck bool
+	RespawnPolicy        RespawnPolicy
 }
 
 var (
 	ErrNicknameTooLong        = errors.New("samp: nickname is too long")
 	ErrMessageTooLong         = errors.New("samp: message is too long")
 	ErrMalformedPacket        = errors.New("samp: malformed packet")
+	ErrClientNotConnected     = errors.New("samp: client is not connected")
+	ErrClientNotSpawned       = errors.New("samp: client is not spawned")
 	ErrSpawnNotReady          = errors.New("samp: spawn information is not ready")
+	ErrSpawnCooldown          = errors.New("samp: respawn cooldown is active")
 	ErrVehicleEntryInProgress = errors.New("samp: another vehicle entry is already in progress")
 	ErrVehicleEntryCanceled   = errors.New("samp: vehicle entry was canceled before completion")
 	ErrVehicleEntryOutOfRange = errors.New("samp: vehicle is not streamed or is outside the normal entry range")
@@ -149,30 +164,32 @@ func NormalizeVehicleEntryMode(mode VehicleEntryMode) (VehicleEntryMode, error) 
 type EventType string
 
 const (
-	EventJoined        EventType = "joined"
-	EventChat          EventType = "chat"
-	EventPlayerJoin    EventType = "player.join"
-	EventPlayerQuit    EventType = "player.quit"
-	EventScores        EventType = "scores"
-	EventDialog        EventType = "dialog"
-	EventDisconnected  EventType = "disconnected"
-	EventProtocolError EventType = "protocol.error"
-	EventTextDrawShow  EventType = "textdraw.show"
-	EventTextDrawHide  EventType = "textdraw.hide"
-	EventTextDrawText  EventType = "textdraw.text"
-	EventObjectAdd     EventType = "object.add"
-	EventObjectRemove  EventType = "object.remove"
-	EventVehicleAdd    EventType = "vehicle.add"
-	EventVehicleRemove EventType = "vehicle.remove"
-	EventPlayerSync    EventType = "player.sync"
-	EventPosition      EventType = "position"
-	EventAppearance    EventType = "appearance"
-	EventVehicleState  EventType = "vehicle.state"
-	EventPlayerHealth  EventType = "player.health"
-	EventVehicleHealth EventType = "vehicle.health"
-	EventSpawned       EventType = "spawned"
-	EventVehicleSync   EventType = "vehicle.sync"
-	EventMovement      EventType = "movement"
+	EventJoined          EventType = "joined"
+	EventChat            EventType = "chat"
+	EventPlayerJoin      EventType = "player.join"
+	EventPlayerQuit      EventType = "player.quit"
+	EventScores          EventType = "scores"
+	EventDialog          EventType = "dialog"
+	EventDisconnected    EventType = "disconnected"
+	EventProtocolError   EventType = "protocol.error"
+	EventTextDrawShow    EventType = "textdraw.show"
+	EventTextDrawHide    EventType = "textdraw.hide"
+	EventTextDrawText    EventType = "textdraw.text"
+	EventObjectAdd       EventType = "object.add"
+	EventObjectRemove    EventType = "object.remove"
+	EventVehicleAdd      EventType = "vehicle.add"
+	EventVehicleRemove   EventType = "vehicle.remove"
+	EventPlayerSync      EventType = "player.sync"
+	EventPosition        EventType = "position"
+	EventAppearance      EventType = "appearance"
+	EventVehicleState    EventType = "vehicle.state"
+	EventPlayerHealth    EventType = "player.health"
+	EventPlayerLifeState EventType = "player.state"
+	EventPlayerDeath     EventType = "player.death"
+	EventVehicleHealth   EventType = "vehicle.health"
+	EventSpawned         EventType = "spawned"
+	EventVehicleSync     EventType = "vehicle.sync"
+	EventMovement        EventType = "movement"
 )
 
 type Event struct {
@@ -247,13 +264,26 @@ type VehicleHealthEvent struct {
 }
 type Client struct {
 	conn                  *raknet.Conn
+	rpcSender             func(context.Context, uint8, []byte, int, raknet.Reliability) error
 	codec                 encoding.Encoding
 	events                chan Event
 	ctx                   context.Context
 	cancel                context.CancelFunc
 	closeOnce             sync.Once
+	eventsMu              sync.RWMutex
+	eventsClosed          bool
+	eventQueue            chan Event
+	eventStop             chan struct{}
+	eventStopOnce         sync.Once
+	eventDone             chan struct{}
+	eventSubmitMu         sync.Mutex
+	eventBatchMu          sync.Mutex
+	eventTerminalMu       sync.Mutex
+	eventTerminal         *Event
 	stateMu               sync.RWMutex
 	syncMu                sync.Mutex
+	deathWireMu           sync.Mutex
+	lifecycle             playerLifecycle
 	position              [3]float32
 	keyMask               uint32
 	afk                   bool
@@ -264,7 +294,9 @@ type Client struct {
 	health                float32
 	armour                float32
 	vehicleHealthKnown    bool
-	spawned               bool
+	respawnHealth         float32
+	respawnArmour         float32
+	respawnHealthKnown    bool
 	localID               uint16
 	skin                  int32
 	team                  uint8
@@ -272,9 +304,8 @@ type Client struct {
 	drunkLevel            uint32
 	drunkLevelSet         bool
 	initObserved          bool
-	spawnRequested        bool
-	spawnInfoReady        bool
 	emulatePCClientCheck  bool
+	respawnPolicy         RespawnPolicy
 	clientCheckStart      time.Time
 	vehicles              map[uint16]VehicleEvent
 	motionMu              sync.Mutex
@@ -296,9 +327,12 @@ type Client struct {
 	vehicleProtocolKeys   uint16
 	vehicleHealth         float32
 	enterPending          bool
+	nextVehicleEntryID    uint64
+	enterPendingID        uint64
 	enterPendingVehicle   uint16
 	enterPendingPassenger bool
 	enterPendingMode      VehicleEntryMode
+	enterPendingKnown     bool
 	enterPendingLastTick  time.Time
 	enterPendingTarget    [3]float32
 	enterPendingHasTarget bool
@@ -306,11 +340,14 @@ type Client struct {
 	enterQueuedVehicle    uint16
 	enterQueuedPassenger  bool
 	enterQueuedMode       VehicleEntryMode
+	enterQueuedKnown      bool
 	exitPending           bool
+	pendingMu             sync.Mutex
+	pendingEvents         []Event
 }
 
 func DialClient(ctx context.Context, address, nickname, password, charset string) (*Client, error) {
-	return DialClientWithOptions(ctx, address, nickname, password, charset, ClientOptions{})
+	return DialClientWithOptions(ctx, address, nickname, password, charset, ClientOptions{RespawnPolicy: RespawnPolicyAutomatic})
 }
 
 func DialClientWithOptions(ctx context.Context, address, nickname, password, charset string, options ClientOptions) (*Client, error) {
@@ -338,9 +375,11 @@ func DialClientWithOptions(ctx context.Context, address, nickname, password, cha
 		ctx:                  runCtx,
 		cancel:               cancel,
 		emulatePCClientCheck: options.EmulatePCClientCheck,
+		respawnPolicy:        options.RespawnPolicy,
 		clientCheckStart:     clientCheckStart,
 		vehicles:             make(map[uint16]VehicleEvent),
 		health:               defaultPlayerHealthValue,
+		lifecycle:            newPlayerLifecycle(),
 	}
 	handshakeCtx, handshakeCancel := context.WithTimeout(ctx, gameHandshakeTimeout)
 	defer handshakeCancel()
@@ -378,6 +417,7 @@ func DialClientWithOptions(ctx context.Context, address, nickname, password, cha
 		conn.Close()
 		return nil, e
 	}
+	c.initEventDispatcher()
 	go c.run()
 	go c.syncLoop()
 	go c.scoreLoop()
@@ -385,15 +425,34 @@ func DialClientWithOptions(ctx context.Context, address, nickname, password, cha
 	return c, nil
 }
 func (c *Client) Events() <-chan Event { return c.events }
+
+func (c *Client) initEventDispatcher() {
+	if c.events == nil {
+		c.events = make(chan Event, 256)
+	}
+	c.eventQueue = make(chan Event, 256)
+	c.eventStop = make(chan struct{})
+	c.eventDone = make(chan struct{})
+	go c.dispatchEvents()
+}
+
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
-		c.StopMovement()
 		// Keep the client/network loops alive while RakNet performs the same
 		// graceful Disconnect(500) sequence as the native SA-MP client. The
 		// transport must send ID_DISCONNECTION_NOTIFICATION before the upper
 		// layer is cancelled.
-		_ = c.conn.Close()
-		c.cancel()
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
+		if c.cancel != nil {
+			c.cancel()
+		}
+		// A Client used by a failed handshake or a unit test has no run loop
+		// that can perform the final event shutdown.
+		if c.eventQueue == nil || c.conn == nil {
+			c.stopEventDispatcher(nil)
+		}
 	})
 	return nil
 }
@@ -453,26 +512,37 @@ func (c *Client) RefreshScores(ctx context.Context) error {
 	return c.sendRPC(ctx, RPCUpdateScores, &w, raknet.Reliable)
 }
 
-// RequestSpawn mirrors the Android raksamp spawn button. A class response
-// only supplies spawn information; the client must explicitly request spawn
-// unless the server sends a forced-spawn outcome.
+// RequestSpawn mirrors the Android raksamp spawn request. A class response
+// only supplies spawn information; the server must authorize each spawn
+// transaction through RPC_RequestSpawn before the client sends RPC_Spawn.
+// Keeping that handshake for respawns is more interoperable than assuming the
+// server still has an outstanding spawn authorization after death.
 func (c *Client) RequestSpawn(ctx context.Context) error {
+	var requestID uint64
+	var started bool
 	c.stateMu.Lock()
-	if !c.spawnInfoReady {
+	if !c.lifecycle.spawnInfoReady {
 		c.stateMu.Unlock()
 		return ErrSpawnNotReady
 	}
-	if c.spawned || c.spawnRequested {
+	if c.lifecycle.spawned || c.lifecycle.spawnRequested || c.lifecycle.spawnPhase == spawnPhaseSpawning {
 		c.stateMu.Unlock()
 		return nil
 	}
-	c.spawnRequested = true
+	if !c.lifecycle.respawnNotBefore.IsZero() && time.Now().Before(c.lifecycle.respawnNotBefore) {
+		c.stateMu.Unlock()
+		return ErrSpawnCooldown
+	}
+	_, requestID, started = c.lifecycle.beginSpawnRequest(time.Now())
+	if !started {
+		c.stateMu.Unlock()
+		return nil
+	}
 	c.stateMu.Unlock()
+	c.emitLifeState(PlayerLifeStateSpawnRequestPending)
 	request := raknet.Writer{}
 	if err := c.sendRPC(ctx, RPCRequestSpawn, &request, raknet.Reliable); err != nil {
-		c.stateMu.Lock()
-		c.spawnRequested = false
-		c.stateMu.Unlock()
+		c.rollbackSpawnRequest(requestID)
 		return err
 	}
 	return nil
@@ -519,6 +589,14 @@ func (c *Client) Teleport(ctx context.Context, x, y, z float32) error {
 	return c.sendSync(ctx)
 }
 func (c *Client) EnterVehicle(ctx context.Context, vehicleID uint16, passenger bool, requestedMode VehicleEntryMode) error {
+	return c.enterVehicle(ctx, vehicleID, passenger, requestedMode, nil)
+}
+
+// enterVehicle is the internal form used by a queued transition. A queued
+// target that was known before the exit must remain known until the new entry
+// commits; otherwise an asynchronous continuation could enter a vehicle after
+// its remove/death RPC was processed.
+func (c *Client) enterVehicle(ctx context.Context, vehicleID uint16, passenger bool, requestedMode VehicleEntryMode, queuedKnown *bool) error {
 	mode, err := NormalizeVehicleEntryMode(requestedMode)
 	if err != nil {
 		return err
@@ -527,6 +605,7 @@ func (c *Client) EnterVehicle(ctx context.Context, vehicleID uint16, passenger b
 		ctx = context.Background()
 	}
 	c.stateMu.RLock()
+	spawned := c.lifecycle.spawned && !c.lifecycle.deathInProgress
 	inVehicle := c.inVehicle
 	currentVehicleID := c.vehicleID
 	currentPassenger := c.passenger
@@ -534,7 +613,12 @@ func (c *Client) EnterVehicle(ctx context.Context, vehicleID uint16, passenger b
 	pendingSame := pending && c.enterPendingVehicle == vehicleID && c.enterPendingPassenger == passenger && c.enterPendingMode == mode
 	queued := c.enterQueued
 	queuedSame := queued && c.enterQueuedVehicle == vehicleID && c.enterQueuedPassenger == passenger && c.enterQueuedMode == mode
+	vehicle, vehicleKnown := c.vehicles[vehicleID]
+	position := c.position
 	c.stateMu.RUnlock()
+	if !spawned {
+		return ErrClientNotSpawned
+	}
 	if inVehicle && currentVehicleID == vehicleID && currentPassenger == passenger {
 		return nil
 	}
@@ -544,12 +628,18 @@ func (c *Client) EnterVehicle(ctx context.Context, vehicleID uint16, passenger b
 	if pending || queued {
 		return ErrVehicleEntryInProgress
 	}
+	entryRequiresKnownVehicle := vehicleKnown
 	if mode == VehicleEntryNormal {
-		c.stateMu.RLock()
-		vehicle, known := c.vehicles[vehicleID]
-		position := c.position
-		c.stateMu.RUnlock()
-		if !known || distance3(position, [3]float32{vehicle.X, vehicle.Y, vehicle.Z}) > normalVehicleEntryMaxDistance {
+		entryRequiresKnownVehicle = true
+	}
+	if queuedKnown != nil {
+		entryRequiresKnownVehicle = *queuedKnown
+		if entryRequiresKnownVehicle && (!vehicleKnown || vehicle.Health <= 0) {
+			return ErrVehicleEntryCanceled
+		}
+	}
+	if mode == VehicleEntryNormal {
+		if !vehicleKnown || vehicle.Health <= 0 || distance3(position, [3]float32{vehicle.X, vehicle.Y, vehicle.Z}) > normalVehicleEntryMaxDistance {
 			return ErrVehicleEntryOutOfRange
 		}
 	}
@@ -559,10 +649,12 @@ func (c *Client) EnterVehicle(ctx context.Context, vehicleID uint16, passenger b
 		c.enterQueuedVehicle = vehicleID
 		c.enterQueuedPassenger = passenger
 		c.enterQueuedMode = mode
+		c.enterQueuedKnown = entryRequiresKnownVehicle
 		c.stateMu.Unlock()
 		if err := c.exitVehicle(ctx, ctx); err != nil {
 			c.stateMu.Lock()
 			c.enterQueued = false
+			c.enterQueuedKnown = false
 			c.enterQueuedMode = ""
 			c.stateMu.Unlock()
 			return err
@@ -575,10 +667,27 @@ func (c *Client) EnterVehicle(ctx context.Context, vehicleID uint16, passenger b
 	// shared RakNet ordering channel.
 	c.syncMu.Lock()
 	c.stateMu.Lock()
+	if !c.lifecycle.spawned || c.lifecycle.deathInProgress {
+		c.stateMu.Unlock()
+		c.syncMu.Unlock()
+		return ErrClientNotSpawned
+	}
+	if entryRequiresKnownVehicle {
+		vehicle, known := c.vehicles[vehicleID]
+		if !known || vehicle.Health <= 0 {
+			c.stateMu.Unlock()
+			c.syncMu.Unlock()
+			return ErrVehicleEntryCanceled
+		}
+	}
+	c.nextVehicleEntryID++
+	entryID := c.nextVehicleEntryID
 	c.enterPending = true
+	c.enterPendingID = entryID
 	c.enterPendingVehicle = vehicleID
 	c.enterPendingPassenger = passenger
 	c.enterPendingMode = mode
+	c.enterPendingKnown = entryRequiresKnownVehicle
 	if mode == VehicleEntryNormal {
 		// The regular client starts the entry task while still on foot and turns
 		// toward the vehicle. This heading is visible in the on-foot sync frames
@@ -624,12 +733,8 @@ func (c *Client) EnterVehicle(ctx context.Context, vehicleID uint16, passenger b
 	}
 	if err := c.sendRPC(ctx, RPCEnterVehicle, &w, raknet.ReliableSequenced); err != nil {
 		c.stateMu.Lock()
-		if c.enterPending && c.enterPendingVehicle == vehicleID && c.enterPendingPassenger == passenger && c.enterPendingMode == mode {
-			c.enterPending = false
-			c.enterPendingMode = ""
-			c.enterPendingLastTick = time.Time{}
-			c.enterPendingTarget = [3]float32{}
-			c.enterPendingHasTarget = false
+		if c.enterPending && c.enterPendingID == entryID && c.enterPendingVehicle == vehicleID && c.enterPendingPassenger == passenger && c.enterPendingMode == mode {
+			c.clearPendingVehicleEntryLocked()
 		}
 		c.stateMu.Unlock()
 		c.syncMu.Unlock()
@@ -645,7 +750,16 @@ func (c *Client) EnterVehicle(ctx context.Context, vehicleID uint16, passenger b
 		if passenger {
 			seatID = 1
 		}
-		c.setVehicleState(vehicleID, seatID)
+		if !c.completeVehicleEntry(vehicleID, passenger, mode, entryID, seatID) {
+			c.syncMu.Unlock()
+			c.stateMu.RLock()
+			spawned := c.lifecycle.spawned && !c.lifecycle.deathInProgress
+			c.stateMu.RUnlock()
+			if !spawned {
+				return ErrClientNotSpawned
+			}
+			return ErrVehicleEntryCanceled
+		}
 		c.syncMu.Unlock()
 		c.emit(Event{Type: EventVehicleState, Data: c.vehicleStateEvent(vehicleID, passenger)})
 		return nil
@@ -656,7 +770,7 @@ func (c *Client) EnterVehicle(ctx context.Context, vehicleID uint16, passenger b
 	// Emit one immediately so a caller does not depend on the next 30 ms tick
 	// to establish the correct post-RPC packet sequence.
 	if err := c.sendSync(ctx); err != nil {
-		c.cancelPendingVehicleEntry(vehicleID, passenger, mode)
+		c.cancelPendingVehicleEntry(entryID, vehicleID, passenger, mode)
 		return err
 	}
 
@@ -669,28 +783,36 @@ func (c *Client) EnterVehicle(ctx context.Context, vehicleID uint16, passenger b
 	select {
 	case <-timer.C:
 	case <-ctx.Done():
-		c.cancelPendingVehicleEntry(vehicleID, passenger, mode)
+		c.cancelPendingVehicleEntry(entryID, vehicleID, passenger, mode)
 		return ctx.Err()
 	case <-clientDone:
-		c.cancelPendingVehicleEntry(vehicleID, passenger, mode)
+		c.cancelPendingVehicleEntry(entryID, vehicleID, passenger, mode)
 		return context.Canceled
 	}
 
 	c.stateMu.RLock()
 	completedByServer := c.inVehicle && c.vehicleID == vehicleID && c.passenger == passenger
-	stillPending := c.enterPending && c.enterPendingVehicle == vehicleID && c.enterPendingPassenger == passenger && c.enterPendingMode == mode
+	entryIDMatches := c.enterPending && c.enterPendingID == entryID && c.enterPendingVehicle == vehicleID && c.enterPendingPassenger == passenger && c.enterPendingMode == mode
 	c.stateMu.RUnlock()
 	if completedByServer {
 		return nil
 	}
-	if !stillPending {
+	if !entryIDMatches {
 		return ErrVehicleEntryCanceled
 	}
 	seatID := uint8(0)
 	if passenger {
 		seatID = 1
 	}
-	c.setVehicleState(vehicleID, seatID)
+	if !c.completeVehicleEntry(vehicleID, passenger, mode, entryID, seatID) {
+		c.stateMu.RLock()
+		spawned := c.lifecycle.spawned && !c.lifecycle.deathInProgress
+		c.stateMu.RUnlock()
+		if !spawned {
+			return ErrClientNotSpawned
+		}
+		return ErrVehicleEntryCanceled
+	}
 	c.emit(Event{Type: EventVehicleState, Data: c.vehicleStateEvent(vehicleID, passenger)})
 	return nil
 }
@@ -699,14 +821,10 @@ func needsVehicleExit(inVehicle bool, currentVehicleID uint16, currentPassenger 
 	return inVehicle && (currentVehicleID != targetVehicleID || currentPassenger != targetPassenger)
 }
 
-func (c *Client) cancelPendingVehicleEntry(vehicleID uint16, passenger bool, mode VehicleEntryMode) {
+func (c *Client) cancelPendingVehicleEntry(entryID uint64, vehicleID uint16, passenger bool, mode VehicleEntryMode) {
 	c.stateMu.Lock()
-	if c.enterPending && c.enterPendingVehicle == vehicleID && c.enterPendingPassenger == passenger && c.enterPendingMode == mode {
-		c.enterPending = false
-		c.enterPendingMode = ""
-		c.enterPendingLastTick = time.Time{}
-		c.enterPendingTarget = [3]float32{}
-		c.enterPendingHasTarget = false
+	if c.enterPending && c.enterPendingID == entryID && c.enterPendingVehicle == vehicleID && c.enterPendingPassenger == passenger && c.enterPendingMode == mode {
+		c.clearPendingVehicleEntryLocked()
 	}
 	c.stateMu.Unlock()
 }
@@ -723,14 +841,15 @@ func (c *Client) exitVehicle(ctx, queuedContext context.Context) error {
 	vehicleID := c.vehicleID
 	inVehicle := c.inVehicle
 	pending := c.exitPending
+	if !c.lifecycle.spawned || c.lifecycle.deathInProgress {
+		c.stateMu.Unlock()
+		return ErrClientNotSpawned
+	}
 	if !inVehicle {
-		c.enterPending = false
-		c.enterPendingMode = ""
-		c.enterPendingLastTick = time.Time{}
-		c.enterPendingTarget = [3]float32{}
-		c.enterPendingHasTarget = false
+		c.clearPendingVehicleEntryLocked()
 		c.exitPending = false
 		c.enterQueued = false
+		c.enterQueuedKnown = false
 		c.enterQueuedMode = ""
 		c.stateMu.Unlock()
 		return nil
@@ -758,20 +877,21 @@ func (c *Client) exitVehicle(ctx, queuedContext context.Context) error {
 	queuedVehicle := c.enterQueuedVehicle
 	queuedPassenger := c.enterQueuedPassenger
 	queuedMode := c.enterQueuedMode
+	queuedKnown := c.enterQueuedKnown
 	shouldEnter := c.enterQueued
 	c.vehicleID, c.inVehicle, c.passenger, c.vehicleSeat = 0, false, false, 0
-	c.enterPending = false
-	c.enterPendingMode = ""
-	c.enterPendingLastTick = time.Time{}
-	c.enterPendingTarget = [3]float32{}
-	c.enterPendingHasTarget = false
+	c.clearPendingVehicleEntryLocked()
 	c.exitPending = false
 	c.enterQueued = false
+	c.enterQueuedVehicle = 0
+	c.enterQueuedPassenger = false
+	c.enterQueuedKnown = false
 	c.enterQueuedMode = ""
 	c.vehicleVelocity = [3]float32{}
 	c.vehicleQuaternion = [4]float32{}
 	c.vehicleLRAnalog, c.vehicleUDAnalog, c.vehicleProtocolKeys = 0, 0, 0
 	c.vehicleHealth = 0
+	c.vehicleHealthKnown = false
 	c.stateMu.Unlock()
 	c.syncMu.Unlock()
 	c.emit(Event{Type: EventVehicleState, Data: VehicleStateEvent{}})
@@ -779,7 +899,7 @@ func (c *Client) exitVehicle(ctx, queuedContext context.Context) error {
 		if queuedContext == nil {
 			queuedContext = c.ctx
 		}
-		if err := c.EnterVehicle(queuedContext, queuedVehicle, queuedPassenger, queuedMode); err != nil {
+		if err := c.enterVehicle(queuedContext, queuedVehicle, queuedPassenger, queuedMode, &queuedKnown); err != nil {
 			c.emit(Event{Type: EventProtocolError, Data: err.Error()})
 		}
 	}
@@ -793,8 +913,10 @@ func (c *Client) syncLoop() {
 		case <-c.ctx.Done():
 			return
 		case <-ticker.C:
+			c.expireSpawnRequest(time.Now())
+			c.retryDeathNotification(time.Now())
 			c.stateMu.RLock()
-			shouldSync := c.spawned && !c.afk
+			shouldSync := c.lifecycle.spawned && !c.lifecycle.deathInProgress && !c.afk
 			c.stateMu.RUnlock()
 			if shouldSync {
 				c.advanceMotion(time.Now())
@@ -854,7 +976,7 @@ func (c *Client) sendSync(ctx context.Context) error {
 	c.syncMu.Lock()
 	defer c.syncMu.Unlock()
 	c.stateMu.RLock()
-	spawned, inVehicle, passenger := c.spawned, c.inVehicle, c.passenger
+	spawned, inVehicle, passenger := c.lifecycle.spawned && !c.lifecycle.deathInProgress, c.inVehicle, c.passenger
 	if !inVehicle && c.enterPending && c.enterPendingMode == VehicleEntryDirect {
 		// A normal client changes its local GTA state as soon as the enter
 		// action starts. Keep this compatibility path for the tiny interval
@@ -1060,15 +1182,29 @@ func protocolAdditionalKey(mask uint32) uint8 {
 	}
 }
 func (c *Client) sendRPC(ctx context.Context, id uint8, w *raknet.Writer, reliability raknet.Reliability) error {
+	if c.rpcSender != nil {
+		return c.rpcSender(ctx, id, w.Bytes(), w.LenBits(), reliability)
+	}
+	if c.conn == nil {
+		return ErrClientNotConnected
+	}
 	return c.conn.Write(ctx, raknet.EncodeRPC(id, w.Bytes(), w.LenBits()), reliability)
 }
 func (c *Client) run() {
-	defer close(c.events)
 	for {
 		packet, e := c.conn.Read(c.ctx)
 		if e != nil {
+			// A read-side disconnect must stop the sync, score, stats and
+			// lifecycle retry loops as well. The manager will own reconnecting
+			// with a fresh Client instance.
+			if c.cancel != nil {
+				c.cancel()
+			}
+			// Cancel first so movement cleanup cannot block behind a full event
+			// queue. The dispatcher still guarantees delivery of this terminal
+			// event before closing Events().
 			c.StopMovement()
-			c.emit(Event{Type: EventDisconnected, Data: e})
+			c.stopEventDispatcher(&Event{Type: EventDisconnected, Data: e})
 			return
 		}
 		if len(packet) == 0 {
@@ -1106,11 +1242,20 @@ func (c *Client) run() {
 			c.emit(Event{Type: EventProtocolError, Data: fmt.Sprintf("RPC envelope (%d bytes): %v", len(packet), e)})
 			continue
 		}
+		c.eventBatchMu.Lock()
+		var batch []Event
 		if event, e := c.decodeRPC(rpc); e != nil {
-			c.emit(Event{Type: EventProtocolError, Data: fmt.Sprintf("RPC %d (%d bits): %v", rpc.ID, rpc.PayloadBits, e)})
+			batch = append(batch, Event{Type: EventProtocolError, Data: fmt.Sprintf("RPC %d (%d bits): %v", rpc.ID, rpc.PayloadBits, e)})
 		} else if event != nil {
-			c.emit(*event)
+			batch = append(batch, *event)
 		}
+		batch = append(batch, c.drainPendingEvents()...)
+		c.emitBatch(batch)
+		c.eventBatchMu.Unlock()
+		// Start policy-driven spawning only after the complete inbound batch,
+		// including death/lifecycle events, has entered the event queue. This
+		// preserves FIFO ordering for observers and plugins.
+		c.startAutomaticSpawn()
 	}
 }
 
@@ -1283,7 +1428,41 @@ func (c *Client) playerHealthEvent() PlayerHealthEvent {
 }
 
 func (c *Client) setPlayerHealth(health float32) PlayerHealthEvent {
+	if health <= 0 {
+		health = 0
+		var finalDriverFrame bool
+		c.syncMu.Lock()
+		c.stateMu.Lock()
+		c.health = health
+		if c.lifecycle.state() == PlayerLifeStateDead {
+			c.respawnHealth = 0
+			c.respawnArmour = 0
+			c.respawnHealthKnown = false
+		}
+		event := PlayerHealthEvent{Health: c.health, Armour: c.armour}
+		shouldDie := c.lifecycle.spawned && !c.lifecycle.deathReported && !c.lifecycle.deathInProgress
+		if shouldDie {
+			finalDriverFrame = c.conn != nil && c.inVehicle && !c.passenger
+			c.lifecycle.deathInProgress = true
+		}
+		c.stateMu.Unlock()
+		c.syncMu.Unlock()
+		if shouldDie {
+			c.completeDeath(DeathSourceServerHealth, finalDriverFrame, unknownDeathCause())
+		}
+		return event
+	}
 	c.stateMu.Lock()
+	if c.lifecycle.state() == PlayerLifeStateDead {
+		// A late positive health update must not make the public dead state look
+		// alive. Keep it as the baseline for the next explicit spawn instead.
+		c.respawnHealth = health
+		c.respawnArmour = c.armour
+		c.respawnHealthKnown = true
+		event := PlayerHealthEvent{Health: 0, Armour: c.armour}
+		c.stateMu.Unlock()
+		return event
+	}
 	c.health = health
 	event := PlayerHealthEvent{Health: c.health, Armour: c.armour}
 	c.stateMu.Unlock()
@@ -1293,6 +1472,9 @@ func (c *Client) setPlayerHealth(health float32) PlayerHealthEvent {
 func (c *Client) setPlayerArmour(armour float32) PlayerHealthEvent {
 	c.stateMu.Lock()
 	c.armour = armour
+	if c.lifecycle.state() == PlayerLifeStateDead && c.respawnHealthKnown {
+		c.respawnArmour = armour
+	}
 	event := PlayerHealthEvent{Health: c.health, Armour: c.armour}
 	c.stateMu.Unlock()
 	return event
@@ -1300,6 +1482,11 @@ func (c *Client) setPlayerArmour(armour float32) PlayerHealthEvent {
 
 func (c *Client) setVehicleHealth(vehicleID uint16, health float32) {
 	c.stateMu.Lock()
+	c.setVehicleHealthLocked(vehicleID, health)
+	c.stateMu.Unlock()
+}
+
+func (c *Client) setVehicleHealthLocked(vehicleID uint16, health float32) {
 	if c.vehicles == nil {
 		c.vehicles = make(map[uint16]VehicleEvent)
 	}
@@ -1311,7 +1498,61 @@ func (c *Client) setVehicleHealth(vehicleID uint16, health float32) {
 		c.vehicleHealth = health
 		c.vehicleHealthKnown = true
 	}
+}
+
+func (c *Client) applyServerVehicleHealth(vehicleID uint16, health float32, _ DeathSource) {
+	// Vehicle destruction is a vehicle-state transition, not proof that the
+	// local ped died. Detach a local occupant and let the next on-foot frame
+	// establish the new state; a native backend can report confirmed ped death
+	// through NotifyLocalPlayerDeath.
+	var queuedVehicle uint16
+	var queuedPassenger bool
+	var queuedMode VehicleEntryMode
+	var queuedKnown bool
+	var shouldEnter bool
+	var detached bool
+	c.syncMu.Lock()
+	c.stateMu.Lock()
+	c.setVehicleHealthLocked(vehicleID, health)
+	if health <= 0 {
+		c.cancelVehicleEntryForVehicleLocked(vehicleID)
+		if c.inVehicle && c.vehicleID == vehicleID {
+			detached = true
+			queuedVehicle, queuedPassenger, queuedMode, queuedKnown, shouldEnter = c.clearVehicleStateLocked()
+		}
+	}
 	c.stateMu.Unlock()
+	c.syncMu.Unlock()
+	if detached {
+		// The vehicle state event is queued after the protocol event returned by
+		// decodeRPC, preserving the wire event first while making the local state
+		// authoritative for subsequent snapshots.
+		c.queuePendingEvent(Event{Type: EventVehicleState, Data: VehicleStateEvent{}})
+	}
+	c.continueQueuedVehicleEntry(queuedVehicle, queuedPassenger, queuedMode, queuedKnown, shouldEnter)
+}
+
+func (c *Client) removeServerVehicle(vehicleID uint16) {
+	var queuedVehicle uint16
+	var queuedPassenger bool
+	var queuedMode VehicleEntryMode
+	var queuedKnown bool
+	var shouldEnter bool
+	var localOccupant bool
+	c.syncMu.Lock()
+	c.stateMu.Lock()
+	localOccupant = c.inVehicle && c.vehicleID == vehicleID
+	c.cancelVehicleEntryForVehicleLocked(vehicleID)
+	delete(c.vehicles, vehicleID)
+	if localOccupant {
+		queuedVehicle, queuedPassenger, queuedMode, queuedKnown, shouldEnter = c.clearVehicleStateLocked()
+	}
+	c.stateMu.Unlock()
+	c.syncMu.Unlock()
+	if localOccupant {
+		c.queuePendingEvent(Event{Type: EventVehicleState, Data: VehicleStateEvent{}})
+		c.continueQueuedVehicleEntry(queuedVehicle, queuedPassenger, queuedMode, queuedKnown, shouldEnter)
+	}
 }
 
 func (c *Client) vehicleStateEvent(vehicleID uint16, passenger bool) VehicleStateEvent {
@@ -1343,20 +1584,16 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 	r := raknet.NewReaderBits(rpc.Payload, rpc.PayloadBits)
 	switch rpc.ID {
 	case RPCInitGame:
-		c.StopMovement()
-		c.setSpawned(false)
 		localPlayerID, e := decodeInitGameLocalPlayerID(r)
 		if e != nil {
 			return nil, e
 		}
+		c.StopMovement()
+		c.resetGameplayState()
 		c.stateMu.Lock()
 		c.localID = localPlayerID
-		c.health = defaultPlayerHealthValue
-		c.armour = 0
-		c.initObserved = false
-		c.spawnRequested = false
-		c.spawnInfoReady = false
 		c.stateMu.Unlock()
+		c.queueLifeState(PlayerLifeStateClassSelection)
 		go c.requestInitialClassFallback()
 		health := c.playerHealthEvent()
 		return &Event{Type: EventJoined, Data: PlayerEvent{ID: localPlayerID, Health: health.Health, Armour: health.Armour}}, nil
@@ -1366,7 +1603,7 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 			return nil, e
 		}
 		if outcome == 0 {
-			return nil, nil
+			return c.rejectClassSelection(), nil
 		}
 		spawnInfo, e := decodeSpawnInfo(r)
 		if e != nil {
@@ -1384,21 +1621,23 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 		if e != nil {
 			return nil, e
 		}
-		c.stateMu.RLock()
-		spawnRequested := c.spawnRequested
-		c.stateMu.RUnlock()
-		spawnApproved := outcome == serverForcedSpawnOutcome || (outcome != 0 && spawnRequested)
+		c.stateMu.Lock()
+		spawnApproved := c.lifecycle.beginSpawning(outcome, serverForcedSpawnOutcome)
+		c.stateMu.Unlock()
 		if spawnApproved {
-			spawn := raknet.Writer{}
-			if e = c.sendRPC(c.ctx, RPCSpawn, &spawn, raknet.ReliableOrdered); e != nil {
+			spawned, e := c.sendSpawnAndCommit(c.ctx)
+			if e != nil {
 				return nil, e
 			}
-			spawned := c.markSpawned()
 			return &Event{Type: EventSpawned, Data: spawned}, nil
 		} else if outcome == 0 {
 			c.stateMu.Lock()
-			c.spawnRequested = false
+			state, rejected := c.lifecycle.rejectSpawnRequest()
 			c.stateMu.Unlock()
+			if !rejected {
+				return nil, nil
+			}
+			return &Event{Type: EventPlayerLifeState, Data: PlayerLifeStateEvent{State: state}}, nil
 		}
 		return nil, nil
 	case RPCSetSpawnInfo:
@@ -1455,7 +1694,9 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 			return nil, e
 		}
 		passenger := seatID != 0
-		c.setVehicleState(vehicleID, seatID)
+		if !c.setVehicleState(vehicleID, seatID) {
+			return nil, nil
+		}
 		return &Event{Type: EventVehicleState, Data: c.vehicleStateEvent(vehicleID, passenger)}, nil
 	case RPCRemoveFromVehicle:
 		c.clearVehicleState()
@@ -1660,13 +1901,7 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 		if e != nil {
 			return nil, e
 		}
-		c.stateMu.Lock()
-		delete(c.vehicles, id)
-		if c.inVehicle && c.vehicleID == id {
-			c.vehicleHealth = 0
-			c.vehicleHealthKnown = false
-		}
-		c.stateMu.Unlock()
+		c.removeServerVehicle(id)
 		return &Event{Type: EventVehicleRemove, Data: VehicleEvent{ID: id}}, nil
 	case RPCSetVehicleHealth:
 		vehicleID, e := r.Uint16()
@@ -1677,14 +1912,14 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 		if e != nil {
 			return nil, e
 		}
-		c.setVehicleHealth(vehicleID, health)
+		c.applyServerVehicleHealth(vehicleID, health, DeathSourceVehicle)
 		return &Event{Type: EventVehicleHealth, Data: VehicleHealthEvent{ID: vehicleID, Health: health}}, nil
 	case RPCVehicleDeath:
 		vehicleID, e := r.Uint16()
 		if e != nil {
 			return nil, e
 		}
-		c.setVehicleHealth(vehicleID, 0)
+		c.applyServerVehicleHealth(vehicleID, 0, DeathSourceVehicle)
 		return &Event{Type: EventVehicleHealth, Data: VehicleHealthEvent{ID: vehicleID, Health: 0}}, nil
 	}
 	return nil, nil
@@ -1801,28 +2036,37 @@ func (c *Client) setOnFootPosition(position [3]float32) {
 	c.passenger = false
 	c.vehicleID = 0
 	c.vehicleSeat = 0
-	c.enterPending = false
-	c.enterPendingMode = ""
-	c.enterPendingLastTick = time.Time{}
-	c.enterPendingTarget = [3]float32{}
-	c.enterPendingHasTarget = false
+	c.clearPendingVehicleEntryLocked()
 	c.exitPending = false
 	c.enterQueued = false
+	c.enterQueuedVehicle = 0
+	c.enterQueuedPassenger = false
+	c.enterQueuedKnown = false
 	c.enterQueuedMode = ""
+	c.vehicleHealth = 0
+	c.vehicleHealthKnown = false
+	c.vehicleVelocity = [3]float32{}
+	c.vehicleQuaternion = [4]float32{}
+	c.vehicleLRAnalog, c.vehicleUDAnalog, c.vehicleProtocolKeys = 0, 0, 0
 	c.clearMotionFrameLocked()
 	c.stateMu.Unlock()
 }
 
-func (c *Client) setVehicleState(vehicleID uint16, seatID uint8) {
+func (c *Client) setVehicleState(vehicleID uint16, seatID uint8) bool {
 	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	return c.setVehicleStateLocked(vehicleID, seatID)
+}
+
+func (c *Client) setVehicleStateLocked(vehicleID uint16, seatID uint8) bool {
+	if !c.lifecycle.spawned || c.lifecycle.deathInProgress {
+		return false
+	}
 	c.vehicleID, c.inVehicle, c.passenger, c.vehicleSeat = vehicleID, true, seatID != 0, seatID
-	c.enterPending = false
-	c.enterPendingMode = ""
-	c.enterPendingLastTick = time.Time{}
-	c.enterPendingTarget = [3]float32{}
-	c.enterPendingHasTarget = false
+	c.clearPendingVehicleEntryLocked()
 	c.exitPending = false
 	c.enterQueued = false
+	c.enterQueuedKnown = false
 	c.enterQueuedMode = ""
 	c.vehicleHealth = 0
 	c.vehicleHealthKnown = false
@@ -1836,73 +2080,239 @@ func (c *Client) setVehicleState(vehicleID uint16, seatID uint8) {
 		c.vehicleHealthKnown = true
 		c.vehicleQuaternion = yawQuaternion(vehicle.Angle)
 	}
-	c.stateMu.Unlock()
+	return true
+}
+
+func (c *Client) completeVehicleEntry(vehicleID uint16, passenger bool, mode VehicleEntryMode, entryID uint64, seatID uint8) bool {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if !c.lifecycle.spawned || c.lifecycle.deathInProgress || !c.enterPending || c.enterPendingID != entryID || c.enterPendingVehicle != vehicleID || c.enterPendingPassenger != passenger || c.enterPendingMode != mode {
+		return false
+	}
+	if mode == VehicleEntryNormal || c.enterPendingKnown {
+		vehicle, ok := c.vehicles[vehicleID]
+		if !ok || vehicle.Health <= 0 {
+			c.clearPendingVehicleEntryLocked()
+			return false
+		}
+	}
+	return c.setVehicleStateLocked(vehicleID, seatID)
+}
+
+func (c *Client) clearPendingVehicleEntryLocked() {
+	c.enterPending = false
+	c.enterPendingID = 0
+	c.enterPendingVehicle = 0
+	c.enterPendingPassenger = false
+	c.enterPendingMode = ""
+	c.enterPendingKnown = false
+	c.enterPendingLastTick = time.Time{}
+	c.enterPendingTarget = [3]float32{}
+	c.enterPendingHasTarget = false
+}
+
+func (c *Client) cancelVehicleEntryForVehicleLocked(vehicleID uint16) bool {
+	cancelled := false
+	if c.enterPending && c.enterPendingVehicle == vehicleID {
+		c.clearPendingVehicleEntryLocked()
+		cancelled = true
+	}
+	if c.enterQueued && c.enterQueuedVehicle == vehicleID {
+		c.enterQueued = false
+		c.enterQueuedVehicle = 0
+		c.enterQueuedPassenger = false
+		c.enterQueuedKnown = false
+		c.enterQueuedMode = ""
+		cancelled = true
+	}
+	return cancelled
 }
 
 func (c *Client) clearVehicleState() {
 	var queuedVehicle uint16
 	var queuedPassenger bool
 	var queuedMode VehicleEntryMode
+	var queuedKnown bool
 	var shouldEnter bool
 	c.stateMu.Lock()
+	queuedVehicle, queuedPassenger, queuedMode, queuedKnown, shouldEnter = c.clearVehicleStateLocked()
+	c.stateMu.Unlock()
+	c.continueQueuedVehicleEntry(queuedVehicle, queuedPassenger, queuedMode, queuedKnown, shouldEnter)
+}
+
+func (c *Client) clearVehicleStateLocked() (queuedVehicle uint16, queuedPassenger bool, queuedMode VehicleEntryMode, queuedKnown bool, shouldEnter bool) {
+	if c.enterQueued {
+		queuedVehicle = c.enterQueuedVehicle
+		queuedPassenger = c.enterQueuedPassenger
+		queuedMode = c.enterQueuedMode
+		queuedKnown = c.enterQueuedKnown
+		shouldEnter = true
+	}
 	c.vehicleID, c.inVehicle, c.passenger, c.vehicleSeat = 0, false, false, 0
-	c.enterPending = false
-	c.enterPendingMode = ""
-	c.enterPendingLastTick = time.Time{}
-	c.enterPendingTarget = [3]float32{}
-	c.enterPendingHasTarget = false
+	c.clearPendingVehicleEntryLocked()
 	c.exitPending = false
+	c.enterQueued = false
+	c.enterQueuedVehicle = 0
+	c.enterQueuedPassenger = false
+	c.enterQueuedKnown = false
+	c.enterQueuedMode = ""
 	c.vehicleVelocity = [3]float32{}
 	c.vehicleQuaternion = [4]float32{}
 	c.vehicleLRAnalog, c.vehicleUDAnalog, c.vehicleProtocolKeys = 0, 0, 0
 	c.vehicleHealth = 0
 	c.vehicleHealthKnown = false
-	if c.enterQueued {
-		queuedVehicle = c.enterQueuedVehicle
-		queuedPassenger = c.enterQueuedPassenger
-		queuedMode = c.enterQueuedMode
-		shouldEnter = true
-		c.enterQueued = false
-		c.enterQueuedMode = ""
+	return queuedVehicle, queuedPassenger, queuedMode, queuedKnown, shouldEnter
+}
+
+func (c *Client) continueQueuedVehicleEntry(queuedVehicle uint16, queuedPassenger bool, queuedMode VehicleEntryMode, queuedKnown bool, shouldEnter bool) {
+	if !shouldEnter || c.ctx == nil {
+		return
 	}
-	c.stateMu.Unlock()
-	if shouldEnter && c.ctx != nil {
-		if err := c.EnterVehicle(c.ctx, queuedVehicle, queuedPassenger, queuedMode); err != nil {
+	ctx := c.ctx
+	go func() {
+		if err := c.enterVehicle(ctx, queuedVehicle, queuedPassenger, queuedMode, &queuedKnown); err != nil {
 			c.emit(Event{Type: EventProtocolError, Data: err.Error()})
 		}
-	}
+	}()
 }
 
 func (c *Client) setSpawnInfo(info SpawnInfo) {
 	c.stateMu.Lock()
 	c.position, c.skin, c.team, c.rotation = info.Position, info.Skin, info.Team, info.Rotation
-	c.spawnInfoReady = true
-	c.stateMu.Unlock()
-}
-
-func (c *Client) setSpawned(spawned bool) {
-	c.stateMu.Lock()
-	c.spawned = spawned
-	if !spawned {
-		c.vehicleHealthKnown = false
+	c.lifecycle.spawnInfoReady = true
+	changed := false
+	if !c.lifecycle.spawned && c.lifecycle.state() != PlayerLifeStateDead && c.lifecycle.spawnPhase == spawnPhaseIdle {
+		changed = c.lifecycle.transition(PlayerLifeStateSpawnReady)
 	}
 	c.stateMu.Unlock()
+	if changed {
+		c.queueLifeState(PlayerLifeStateSpawnReady)
+	}
 }
 
 func (c *Client) markSpawned() SpawnedEvent {
+	c.deathWireMu.Lock()
+	defer c.deathWireMu.Unlock()
+	return c.markSpawnedLocked()
+}
+
+func (c *Client) sendSpawnAndCommit(ctx context.Context) (SpawnedEvent, error) {
+	c.deathWireMu.Lock()
+	defer c.deathWireMu.Unlock()
+	spawn := raknet.Writer{}
+	if err := c.sendRPC(ctx, RPCSpawn, &spawn, raknet.ReliableOrdered); err != nil {
+		c.rollbackSpawning()
+		return SpawnedEvent{}, err
+	}
+	return c.markSpawnedLocked(), nil
+}
+
+func (c *Client) markSpawnedLocked() SpawnedEvent {
 	c.stateMu.Lock()
 	// SpawnInfo carries team, skin, transform, weapons and ammunition, but no
 	// health or armour. A dead local client needs a default baseline for its
 	// first sync; preserve a positive server-provided value if it arrived before
 	// the spawn acknowledgement, and let later health RPCs remain authoritative.
-	if c.health <= 0 || math.IsNaN(float64(c.health)) || math.IsInf(float64(c.health), 0) {
+	if c.respawnHealthKnown {
+		c.health = c.respawnHealth
+		c.armour = c.respawnArmour
+	} else if c.health <= 0 || math.IsNaN(float64(c.health)) || math.IsInf(float64(c.health), 0) {
 		c.health = defaultPlayerHealthValue
 		c.armour = 0
 	}
-	c.spawned = true
+	changed := c.lifecycle.transition(PlayerLifeStateSpawned)
+	c.lifecycle.invalidateAutomaticSpawn()
+	c.lifecycle.spawnRequested = false
+	c.lifecycle.spawnRequestOrigin = PlayerLifeStateSpawnReady
+	c.lifecycle.spawnPhase = spawnPhaseIdle
+	c.lifecycle.spawnRequestAt = time.Time{}
+	c.lifecycle.deathReported = false
+	c.lifecycle.deathInProgress = false
+	c.lifecycle.respawnNotBefore = time.Time{}
+	c.lifecycle.clearDeathReportRetry()
+	c.respawnHealth = 0
+	c.respawnArmour = 0
+	c.respawnHealthKnown = false
+	// A spawn is a new gameplay epoch. Clear every transient network control
+	// field in one place so stale vehicle/task state cannot leak across death.
+	c.inVehicle = false
+	c.passenger = false
+	c.vehicleID = 0
+	c.vehicleSeat = 0
+	c.clearPendingVehicleEntryLocked()
+	c.enterQueued = false
+	c.enterQueuedVehicle = 0
+	c.enterQueuedPassenger = false
+	c.enterQueuedKnown = false
+	c.enterQueuedMode = ""
+	c.exitPending = false
+	c.keyMask = 0
+	c.vehicleHealth = 0
+	c.vehicleHealthKnown = false
+	c.vehicleVelocity = [3]float32{}
+	c.vehicleQuaternion = [4]float32{}
+	c.vehicleLRAnalog = 0
+	c.vehicleUDAnalog = 0
+	c.vehicleProtocolKeys = 0
+	c.clearMotionFrameLocked()
 	event := SpawnedEvent{Health: c.health, Armour: c.armour}
 	c.stateMu.Unlock()
+	if changed {
+		c.queueLifeState(PlayerLifeStateSpawned)
+	}
 	return event
+}
+
+func (c *Client) resetGameplayState() {
+	c.syncMu.Lock()
+	c.deathWireMu.Lock()
+	c.stateMu.Lock()
+	c.lifecycle.resetForConnection()
+	c.position = [3]float32{}
+	c.keyMask = 0
+	c.afk = false
+	c.vehicleID = 0
+	c.inVehicle = false
+	c.passenger = false
+	c.vehicleSeat = 0
+	c.health = defaultPlayerHealthValue
+	c.armour = 0
+	c.respawnHealth = 0
+	c.respawnArmour = 0
+	c.respawnHealthKnown = false
+	c.localID = 0
+	c.skin = 0
+	c.team = 0
+	c.rotation = 0
+	c.drunkLevel = 0
+	c.drunkLevelSet = false
+	c.initObserved = false
+	c.vehicleHealthKnown = false
+	c.clearPendingVehicleEntryLocked()
+	c.enterQueued = false
+	c.enterQueuedVehicle = 0
+	c.enterQueuedPassenger = false
+	c.enterQueuedKnown = false
+	c.enterQueuedMode = ""
+	c.exitPending = false
+	c.vehicleHealth = 0
+	c.vehicleVelocity = [3]float32{}
+	c.vehicleQuaternion = [4]float32{}
+	c.vehicleLRAnalog = 0
+	c.vehicleUDAnalog = 0
+	c.vehicleProtocolKeys = 0
+	c.clearMotionFrameLocked()
+	if c.vehicles == nil {
+		c.vehicles = make(map[uint16]VehicleEvent)
+	} else {
+		clear(c.vehicles)
+	}
+	c.stateMu.Unlock()
+	c.pendingMu.Lock()
+	c.pendingEvents = nil
+	c.pendingMu.Unlock()
+	c.deathWireMu.Unlock()
+	c.syncMu.Unlock()
 }
 
 func (c *Client) observeServerInitialization() {
@@ -1914,7 +2324,7 @@ func (c *Client) observeServerInitialization() {
 func (c *Client) shouldRequestInitialClass() bool {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
-	return !c.spawned && !c.initObserved
+	return !c.lifecycle.spawned && !c.initObserved
 }
 
 func (c *Client) requestInitialClassFallback() {
@@ -2078,8 +2488,142 @@ func decodeDialog(r *raknet.Reader, codec encoding.Encoding) (DialogEvent, error
 	return DialogEvent{ID: id, Style: style, Title: decodeText(codec, []byte(title)), Button1: decodeText(codec, []byte(b1)), Button2: decodeText(codec, []byte(b2)), Message: decodeText(codec, message), RawMessage: append([]byte(nil), message...)}, nil
 }
 func (c *Client) emit(e Event) {
+	c.emitBatch([]Event{e})
+}
+
+func (c *Client) emitBatch(batch []Event) {
+	if len(batch) == 0 {
+		return
+	}
+	if c.eventQueue == nil {
+		for _, event := range batch {
+			c.emitDirect(event)
+		}
+		return
+	}
+
+	c.eventSubmitMu.Lock()
+	defer c.eventSubmitMu.Unlock()
+	for _, event := range batch {
+		select {
+		case c.eventQueue <- event:
+		case <-c.eventStop:
+			return
+		case <-c.ctx.Done():
+			return
+		}
+	}
+}
+
+func (c *Client) emitDirect(e Event) {
+	if c.events == nil || c.ctx == nil {
+		return
+	}
+	c.eventsMu.RLock()
+	defer c.eventsMu.RUnlock()
+	if c.eventsClosed {
+		return
+	}
 	select {
 	case c.events <- e:
 	case <-c.ctx.Done():
 	}
+}
+
+func (c *Client) dispatchEvents() {
+	defer close(c.eventDone)
+	for {
+		select {
+		case <-c.eventStop:
+			c.finishEventDispatch()
+			return
+		case event := <-c.eventQueue:
+			if !c.deliverEvent(event) {
+				c.finishEventDispatch()
+				return
+			}
+		}
+	}
+}
+
+func (c *Client) deliverEvent(event Event) bool {
+	c.eventsMu.RLock()
+	defer c.eventsMu.RUnlock()
+	if c.eventsClosed || c.events == nil {
+		return false
+	}
+	select {
+	case c.events <- event:
+		return true
+	case <-c.eventStop:
+		return false
+	}
+}
+
+func (c *Client) stopEventDispatcher(terminal *Event) {
+	if c.eventQueue == nil {
+		c.closeEvents()
+		return
+	}
+	if terminal != nil {
+		c.eventTerminalMu.Lock()
+		if c.eventTerminal == nil {
+			copy := *terminal
+			c.eventTerminal = &copy
+		}
+		c.eventTerminalMu.Unlock()
+	}
+	c.eventStopOnce.Do(func() {
+		close(c.eventStop)
+	})
+	// Callers that initiate shutdown need a deterministic hand-off: once this
+	// returns, the terminal event has either been delivered or the public
+	// channel has been closed after the dispatcher completed its final drain.
+	if c.eventDone != nil {
+		<-c.eventDone
+	}
+}
+
+func (c *Client) finishEventDispatch() {
+	c.eventTerminalMu.Lock()
+	terminal := c.eventTerminal
+	c.eventTerminalMu.Unlock()
+	if terminal != nil {
+		c.deliverTerminal(*terminal)
+	}
+	c.closeEvents()
+}
+
+func (c *Client) deliverTerminal(event Event) {
+	c.eventsMu.Lock()
+	defer c.eventsMu.Unlock()
+	if c.eventsClosed || c.events == nil {
+		return
+	}
+	// Terminal delivery must not be blocked by ordinary event backpressure.
+	// Evict the oldest buffered event when necessary; after disconnect no
+	// queued gameplay event is more important than allowing consumers to
+	// observe termination and finish reconnect/cleanup.
+	for {
+		select {
+		case c.events <- event:
+			return
+		default:
+			select {
+			case <-c.events:
+			default:
+				return
+			}
+		}
+	}
+}
+
+func (c *Client) closeEvents() {
+	c.eventsMu.Lock()
+	defer c.eventsMu.Unlock()
+	if c.eventsClosed || c.events == nil {
+		return
+	}
+	c.eventsClosed = true
+	close(c.events)
 }
