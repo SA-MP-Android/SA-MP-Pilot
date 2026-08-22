@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { ChevronRight, Code2, Globe2, Plus, Plug, Radio, Telescope } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -23,12 +23,19 @@ import { Button } from '@/components/ui/button'
 import { Card, CardDescription, CardHeader } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { ServerDialog } from '@/features/dialogs/server-dialog'
 import { ServerForm } from '@/features/instances/server-form'
 import { Workspace } from '@/features/workspace/workspace'
-import { PluginConsole } from '@/features/plugins/plugin-console'
-import { PluginManager } from '@/features/plugins/plugin-manager'
 import { InstanceSyncController } from '@/lib/instance-sync'
+
+const LazyServerDialog = lazy(() =>
+  import('@/features/dialogs/server-dialog').then(({ ServerDialog }) => ({ default: ServerDialog })),
+)
+const LazyPluginConsole = lazy(() =>
+  import('@/features/plugins/plugin-console').then(({ PluginConsole }) => ({ default: PluginConsole })),
+)
+const LazyPluginManager = lazy(() =>
+  import('@/features/plugins/plugin-manager').then(({ PluginManager }) => ({ default: PluginManager })),
+)
 
 const defaultServer: Omit<Server, 'id'> = {
   host: DEFAULT_HOST,
@@ -40,21 +47,31 @@ const defaultServer: Omit<Server, 'id'> = {
   emulatePcClientCheck: false,
 }
 
-export { ServerDialog } from '@/features/dialogs/server-dialog'
-
 export default function App() {
   const { t, i18n } = useTranslation()
   const [items, setItems] = useState<Snapshot[]>([])
   const [selected, setSelected] = useState('')
   const [adding, setAdding] = useState(false)
   const [pluginsOpen, setPluginsOpen] = useState(false)
+  const [pluginsLoaded, setPluginsLoaded] = useState(false)
   const [debugOpen, setDebugOpen] = useState(false)
+  const [debugLoaded, setDebugLoaded] = useState(false)
   const [pluginEvents, setPluginEvents] = useState<Event[]>([])
   const [form, setForm] = useState(defaultServer)
   const chatBefore = useRef<Record<string, number | undefined>>({})
   const loadingChat = useRef(new Set<string>())
   const sync = useRef<InstanceSyncController | null>(null)
   const current = useMemo(() => items.find((item) => item.server.id === selected), [items, selected])
+
+  const openPlugins = () => {
+    setPluginsLoaded(true)
+    setPluginsOpen(true)
+  }
+
+  const openDebug = () => {
+    setDebugLoaded(true)
+    setDebugOpen(true)
+  }
 
   useEffect(() => {
     const controller = new InstanceSyncController(
@@ -140,11 +157,11 @@ export default function App() {
             <p className="text-muted-foreground text-xs">{t('app.subtitle')}</p>
           </div>
           <div className="ml-auto flex items-center gap-2">
-            <Button variant="outline" className="px-2 sm:px-4" onClick={() => setPluginsOpen(true)}>
+            <Button variant="outline" className="px-2 sm:px-4" onClick={openPlugins}>
               <Plug size={16} />
               <span className="hidden sm:inline">{t('plugins.open')}</span>
             </Button>
-            <Button variant="outline" className="px-2 sm:px-4" onClick={() => setDebugOpen(true)}>
+            <Button variant="outline" className="px-2 sm:px-4" onClick={openDebug}>
               <Code2 size={16} />
               <span className="hidden sm:inline">{t('plugins.debugOpen')}</span>
             </Button>
@@ -235,7 +252,9 @@ export default function App() {
         </section>
       </main>
       {!adding && current?.activeDialog && (
-        <ServerDialog key={`${current.server.id}:${current.activeDialog.id}`} value={current} />
+        <Suspense fallback={null}>
+          <LazyServerDialog key={`${current.server.id}:${current.activeDialog.id}`} value={current} />
+        </Suspense>
       )}
       <Dialog open={adding} onOpenChange={setAdding}>
         <DialogContent>
@@ -251,14 +270,22 @@ export default function App() {
           />
         </DialogContent>
       </Dialog>
-      <PluginConsole
-        open={debugOpen}
-        onOpenChange={setDebugOpen}
-        initialInstanceId={selected}
-        instances={items}
-        streamEvents={pluginEvents}
-      />
-      <PluginManager open={pluginsOpen} onOpenChange={setPluginsOpen} streamEvents={pluginEvents} />
+      {debugLoaded && (
+        <Suspense fallback={null}>
+          <LazyPluginConsole
+            open={debugOpen}
+            onOpenChange={setDebugOpen}
+            initialInstanceId={selected}
+            instances={items}
+            streamEvents={pluginEvents}
+          />
+        </Suspense>
+      )}
+      {pluginsLoaded && (
+        <Suspense fallback={null}>
+          <LazyPluginManager open={pluginsOpen} onOpenChange={setPluginsOpen} streamEvents={pluginEvents} />
+        </Suspense>
+      )}
     </div>
   )
 }

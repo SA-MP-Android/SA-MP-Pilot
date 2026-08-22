@@ -2,7 +2,8 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ServerDialog } from './App'
+import './i18n'
+import { ServerDialog } from './features/dialogs/server-dialog'
 import { Workspace } from './features/workspace/workspace'
 import { api } from './api'
 import type { Snapshot } from './types'

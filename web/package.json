@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "analyze": "tsc -b && ANALYZE=1 ANALYZE_OUTPUT=/tmp/sa-mp-pilot-bundle.json vite build --outDir /tmp/sa-mp-pilot-dist",
     "lint": "oxlint . && tsc -b --noEmit",
     "preview": "vite preview",
     "test": "vitest run",
@@ -61,6 +62,7 @@
     "oxlint": "^1.75.0",
     "prettier": "^3.9.6",
     "prettier-plugin-tailwindcss": "^0.8.1",
+    "rollup-plugin-visualizer": "^7.1.1",
     "tailwindcss": "^4.3.3",
     "typescript": "~6.0.2",
     "vite": "^8.2.0",
