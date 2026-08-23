@@ -399,15 +399,17 @@ func nextAutoRespawnDelay(previous time.Duration) time.Duration {
 	return next
 }
 
-// startAutomaticSpawn starts one policy worker for the current lifecycle
-// epoch. The worker is deliberately outside the decoder: it can wait for
-// spawn information, retry a rejected request, and stop as soon as a spawn is
-// committed without complicating RPC parsing.
+// startAutomaticSpawn starts one policy worker for a confirmed death. Initial
+// spawning remains explicit: some servers use their class-selection flow to
+// authorize the first spawn and reject unsolicited RequestSpawn RPCs. The
+// worker is deliberately outside the decoder: it can wait for spawn
+// information, retry a rejected respawn request, and stop as soon as a spawn
+// is committed without complicating RPC parsing.
 func (c *Client) startAutomaticSpawn() {
 	c.stateMu.Lock()
 	state := c.lifecycle.state()
 	if c.respawnPolicy != RespawnPolicyAutomatic ||
-		(state != PlayerLifeStateDead && state != PlayerLifeStateSpawnReady) ||
+		state != PlayerLifeStateDead ||
 		c.lifecycle.autoRespawnRunning {
 		c.stateMu.Unlock()
 		return
@@ -436,7 +438,7 @@ func (c *Client) runAutomaticSpawn(epoch uint64, initialDelay time.Duration) {
 		c.stateMu.Lock()
 		restart := epoch == c.lifecycle.autoRespawnEpoch &&
 			c.respawnPolicy == RespawnPolicyAutomatic &&
-			(c.lifecycle.state() == PlayerLifeStateDead || c.lifecycle.state() == PlayerLifeStateSpawnReady) &&
+			c.lifecycle.state() == PlayerLifeStateDead &&
 			ctx.Err() == nil
 		if epoch == c.lifecycle.autoRespawnEpoch {
 			c.lifecycle.autoRespawnRunning = false
@@ -473,7 +475,7 @@ func (c *Client) runAutomaticSpawn(epoch uint64, initialDelay time.Duration) {
 		policy := c.respawnPolicy
 		c.stateMu.RUnlock()
 		if currentEpoch != epoch || policy != RespawnPolicyAutomatic ||
-			(state != PlayerLifeStateDead && state != PlayerLifeStateSpawnReady) {
+			state != PlayerLifeStateDead {
 			return
 		}
 		if ready {

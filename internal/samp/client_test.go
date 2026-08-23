@@ -506,6 +506,33 @@ func TestAutomaticRespawnCompletesRequestResponseHandshake(t *testing.T) {
 	}
 }
 
+func TestAutomaticRespawnDoesNotRequestInitialSpawn(t *testing.T) {
+	c := &Client{
+		ctx:           context.Background(),
+		respawnPolicy: RespawnPolicyAutomatic,
+		lifecycle: playerLifecycle{
+			lifeState:      PlayerLifeStateSpawnReady,
+			spawnInfoReady: true,
+		},
+		rpcSender: func(_ context.Context, id uint8, _ []byte, _ int, _ raknet.Reliability) error {
+			if id == RPCRequestSpawn {
+				t.Fatal("automatic policy requested an initial spawn")
+			}
+			return nil
+		},
+	}
+
+	c.startAutomaticSpawn()
+
+	c.stateMu.RLock()
+	running := c.lifecycle.autoRespawnRunning
+	state := c.lifecycle.state()
+	c.stateMu.RUnlock()
+	if running || state != PlayerLifeStateSpawnReady {
+		t.Fatalf("initial spawn lifecycle = running:%v state:%q", running, state)
+	}
+}
+
 func TestVehicleHealthRPCsUpdateStreamedAndCurrentVehicle(t *testing.T) {
 	c := &Client{
 		vehicles:  map[uint16]VehicleEvent{7: {ID: 7, ModelID: 411, X: 1, Health: 1000}},
