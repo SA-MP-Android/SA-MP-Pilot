@@ -89,6 +89,34 @@ func TestEncodeVehicleLayout(t *testing.T) {
 	}
 }
 
+func TestSyncEncodersNormalizeInvalidWeapons(t *testing.T) {
+	onFoot := encodeOnFootFrame(onFootFrame{weapon: 0xff})
+	if got := onFoot[testWeaponOffset]; got != 0xc0 {
+		t.Fatalf("on-foot weapon byte = %#x, want additional keys preserved with unarmed", got)
+	}
+
+	vehicle := encodeVehicleFrame(vehicleFrame{weapon: 0xff}, 3)
+	if got := vehicle[55]; got != 0xc0 {
+		t.Fatalf("vehicle weapon byte = %#x, want additional keys preserved with unarmed", got)
+	}
+
+	passenger := encodePassengerFrame(passengerFrame{additionalKey: 3, weapon: 0xff})
+	if got := passenger[4]; got != 0xc0 {
+		t.Fatalf("passenger weapon byte = %#x, want additional keys preserved with unarmed", got)
+	}
+}
+
+func TestNormalizeSyncWeaponAcceptsProtocolRange(t *testing.T) {
+	for _, weapon := range []uint8{0, maxSyncWeaponID} {
+		if got := normalizeSyncWeapon(weapon); got != weapon {
+			t.Errorf("normalizeSyncWeapon(%d) = %d", weapon, got)
+		}
+	}
+	if got := normalizeSyncWeapon(maxSyncWeaponID + 1); got != 0 {
+		t.Fatalf("normalizeSyncWeapon(%d) = %d, want unarmed", maxSyncWeaponID+1, got)
+	}
+}
+
 func TestDecodePlayerSync(t *testing.T) {
 	w := raknet.Writer{}
 	w.Uint8(packetPlayerSync)

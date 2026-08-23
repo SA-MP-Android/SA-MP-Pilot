@@ -101,6 +101,7 @@ const (
 	// next tick after InitGame rather than after a half-second fallback wait.
 	serverInitGracePeriod = playerSyncInterval
 	onFootPayloadBytes    = 69
+	maxSyncWeaponID       = 46
 )
 
 // RespawnPolicy controls who drives the spawn transaction after class data or
@@ -999,7 +1000,7 @@ func (c *Client) sendOnFoot(ctx context.Context) error {
 		lrAnalog: c.onFootLRAnalog, udAnalog: c.onFootUDAnalog,
 		keys:     c.onFootProtocolKeys | protocolKeys(c.keyMask),
 		position: c.position, quaternion: c.onFootQuaternion,
-		health: syncHealthByte(c.health), armour: syncHealthByte(c.armour), weapon: c.onFootWeapon | protocolAdditionalKey(c.keyMask)<<6,
+		health: syncHealthByte(c.health), armour: syncHealthByte(c.armour), weapon: normalizeSyncWeapon(c.onFootWeapon) | (protocolAdditionalKey(c.keyMask)&0x03)<<6,
 		specialAction: c.onFootSpecialAction, velocity: c.onFootVelocity,
 		animationID: c.onFootAnimationID, animationFlags: c.onFootAnimationFlags,
 	}
@@ -1047,7 +1048,7 @@ func (c *Client) sendVehicle(ctx context.Context, passenger bool) error {
 	}
 	passengerFrame := passengerFrame{
 		vehicleID: vehicleID, seatID: vehicleSeat, playerHealth: syncHealthByte(c.health), playerArmour: syncHealthByte(c.armour),
-		additionalKey: protocolAdditionalKey(mask), weapon: c.onFootWeapon,
+		additionalKey: protocolAdditionalKey(mask) & 0x03, weapon: normalizeSyncWeapon(c.onFootWeapon),
 		lrAnalog: c.vehicleLRAnalog, udAnalog: c.vehicleUDAnalog,
 		keys: c.vehicleProtocolKeys | protocolVehicleKeys(mask), position: position,
 	}
@@ -1075,7 +1076,7 @@ func encodeOnFootFrame(frame onFootFrame) []byte {
 	}
 	w.Uint8(frame.health)
 	w.Uint8(frame.armour)
-	w.Uint8(frame.weapon)
+	w.Uint8((normalizeSyncWeapon(frame.weapon) & 0x3f) | (frame.weapon & 0xc0))
 	w.Uint8(frame.specialAction)
 	for _, value := range frame.velocity {
 		w.Float32(value)
@@ -1108,7 +1109,7 @@ func encodeVehicleFrame(frame vehicleFrame, additionalKey uint8) []byte {
 	w.Float32(frame.vehicleHealth)
 	w.Uint8(frame.playerHealth)
 	w.Uint8(frame.playerArmour)
-	w.Uint8((frame.weapon & 0x3f) | (additionalKey&0x03)<<6)
+	w.Uint8(normalizeSyncWeapon(frame.weapon) | (additionalKey&0x03)<<6)
 	w.Uint8(frame.siren)
 	w.Uint8(frame.landingGear)
 	w.Uint16(frame.trailerID)
@@ -1122,8 +1123,8 @@ func encodePassengerFrame(frame passengerFrame) []byte {
 	w.Uint16(frame.vehicleID)
 	writeBitField(&w, frame.driveBy, 2)
 	writeBitField(&w, frame.seatID, 6)
-	writeBitField(&w, frame.additionalKey, 2)
-	writeBitField(&w, frame.weapon, 6)
+	writeBitField(&w, frame.additionalKey&0x03, 2)
+	writeBitField(&w, normalizeSyncWeapon(frame.weapon), 6)
 	w.Uint8(frame.playerHealth)
 	w.Uint8(frame.playerArmour)
 	w.Uint16(frame.lrAnalog)
@@ -1137,6 +1138,13 @@ func encodePassengerFrame(frame passengerFrame) []byte {
 
 func writeBitField(w *raknet.Writer, value uint8, bits int) {
 	w.Bits([]byte{value}, bits, true)
+}
+
+func normalizeSyncWeapon(weapon uint8) uint8 {
+	if weapon <= maxSyncWeaponID {
+		return weapon
+	}
+	return 0
 }
 
 func protocolKeys(mask uint32) uint16 {
