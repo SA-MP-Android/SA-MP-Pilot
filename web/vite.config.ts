@@ -30,10 +30,13 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              name: 'lezer',
+              test: /node_modules\/\.pnpm\/@lezer/,
+              priority: 30,
+            },
+            {
               name: 'codemirror',
-              test: /node_modules\/\.pnpm\/(?:@codemirror|@lezer|@uiw)/,
-              maxSize: 300_000,
-              minSize: 0,
+              test: /node_modules\/\.pnpm\/(?:@codemirror|@uiw)/,
               priority: 20,
             },
           ],
