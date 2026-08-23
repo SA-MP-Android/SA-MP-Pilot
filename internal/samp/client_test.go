@@ -452,8 +452,11 @@ func TestUnknownDeathNotificationDoesNotSendFistReason(t *testing.T) {
 	var wirePayload []byte
 	c := &Client{
 		lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned},
-		rpcSender: func(_ context.Context, id uint8, payload []byte, _ int, _ raknet.Reliability) error {
+		rpcSender: func(_ context.Context, id uint8, payload []byte, _ int, reliability raknet.Reliability) error {
 			if id == RPCDeath {
+				if reliability != raknet.ReliableSequenced {
+					t.Fatalf("death notification reliability = %v, want %v", reliability, raknet.ReliableSequenced)
+				}
 				wirePayload = append([]byte(nil), payload...)
 			}
 			return nil
@@ -469,9 +472,12 @@ func TestNativeDeathCauseIsPreservedInEventAndNotification(t *testing.T) {
 	var wirePayload []byte
 	c := &Client{
 		lifecycle: playerLifecycle{spawned: true, lifeState: PlayerLifeStateSpawned},
-		rpcSender: func(_ context.Context, id uint8, payload []byte, _ int, _ raknet.Reliability) error {
+		rpcSender: func(_ context.Context, id uint8, payload []byte, _ int, reliability raknet.Reliability) error {
 			if id != RPCDeath {
 				t.Fatalf("death notification RPC = %d, want %d", id, RPCDeath)
+			}
+			if reliability != raknet.ReliableSequenced {
+				t.Fatalf("death notification reliability = %v, want %v", reliability, raknet.ReliableSequenced)
 			}
 			wirePayload = append([]byte(nil), payload...)
 			return nil
@@ -492,25 +498,24 @@ func TestNativeDeathCauseIsPreservedInEventAndNotification(t *testing.T) {
 	}
 }
 
-func TestAutomaticRespawnCompletesRequestResponseHandshake(t *testing.T) {
+func TestAutomaticRespawnSendsDirectSpawn(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	spawned := make(chan struct{})
-	var c *Client
-	c = &Client{
+	var rpcIDs []uint8
+	c := &Client{
 		ctx:           ctx,
 		respawnPolicy: RespawnPolicyAutomatic,
 		lifecycle: playerLifecycle{
 			lifeState:      PlayerLifeStateDead,
 			spawnInfoReady: true,
 		},
-		rpcSender: func(_ context.Context, id uint8, _ []byte, _ int, _ raknet.Reliability) error {
-			if id == RPCRequestSpawn {
-				if _, err := c.decodeRPC(raknet.RPC{ID: RPCRequestSpawn, Payload: []byte{1}, PayloadBits: 8}); err != nil {
-					return err
-				}
-			}
+		rpcSender: func(_ context.Context, id uint8, _ []byte, _ int, reliability raknet.Reliability) error {
+			rpcIDs = append(rpcIDs, id)
 			if id == RPCSpawn {
+				if reliability != raknet.ReliableSequenced {
+					t.Errorf("spawn reliability = %v, want %v", reliability, raknet.ReliableSequenced)
+				}
 				close(spawned)
 			}
 			return nil
@@ -525,6 +530,9 @@ func TestAutomaticRespawnCompletesRequestResponseHandshake(t *testing.T) {
 	}
 	if elapsed := time.Since(startedAt); elapsed < autoRespawnAfterDeathDelay {
 		t.Fatalf("automatic respawn started after %s, want at least %s", elapsed, autoRespawnAfterDeathDelay)
+	}
+	if len(rpcIDs) != 1 || rpcIDs[0] != RPCSpawn {
+		t.Fatalf("automatic respawn RPCs = %v, want [%d]", rpcIDs, RPCSpawn)
 	}
 	c.stateMu.RLock()
 	state, isSpawned := c.lifecycle.state(), c.lifecycle.spawned
@@ -921,7 +929,7 @@ func TestResetGameplayStateInvalidatesPreviousAutomaticWorker(t *testing.T) {
 	}
 }
 
-func TestRequestSpawnAfterDeathStartsServerHandshake(t *testing.T) {
+func TestRequestSpawnAfterDeathSendsDirectSpawn(t *testing.T) {
 	var rpcIDs []uint8
 	c := &Client{
 		ctx: context.Background(),
@@ -931,18 +939,24 @@ func TestRequestSpawnAfterDeathStartsServerHandshake(t *testing.T) {
 			deathReported:      true,
 			spawnRequestOrigin: PlayerLifeStateDead,
 		},
-		rpcSender: func(_ context.Context, id uint8, _ []byte, _ int, _ raknet.Reliability) error {
+		rpcSender: func(_ context.Context, id uint8, _ []byte, _ int, reliability raknet.Reliability) error {
 			rpcIDs = append(rpcIDs, id)
+			if id != RPCSpawn {
+				t.Fatalf("respawn RPC = %d, want %d", id, RPCSpawn)
+			}
+			if reliability != raknet.ReliableSequenced {
+				t.Fatalf("respawn reliability = %v, want %v", reliability, raknet.ReliableSequenced)
+			}
 			return nil
 		},
 	}
 	if err := c.RequestSpawn(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(rpcIDs) != 1 || rpcIDs[0] != RPCRequestSpawn {
-		t.Fatalf("respawn RPCs = %v, want [%d]", rpcIDs, RPCRequestSpawn)
+	if len(rpcIDs) != 1 || rpcIDs[0] != RPCSpawn {
+		t.Fatalf("respawn RPCs = %v, want [%d]", rpcIDs, RPCSpawn)
 	}
-	if c.lifecycle.spawned || c.lifecycle.state() != PlayerLifeStateSpawnRequestPending || c.lifecycle.spawnPhase != spawnPhaseRequesting {
+	if !c.lifecycle.spawned || c.lifecycle.state() != PlayerLifeStateSpawned || c.lifecycle.spawnPhase != spawnPhaseIdle {
 		t.Fatalf("respawn lifecycle = %+v", c.lifecycle)
 	}
 }

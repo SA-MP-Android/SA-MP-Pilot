@@ -163,6 +163,21 @@ func (l *playerLifecycle) beginSpawnRequest(now time.Time) (PlayerLifeState, uin
 	return origin, l.spawnRequestID, true
 }
 
+// beginDirectSpawn starts the PC SA-MP death-respawn transaction. Once a
+// player has been spawned, the class/spawn information already sent by the
+// server remains valid for the next life; the client sends RPC_Spawn directly
+// instead of asking the server to open another class-selection request.
+func (l *playerLifecycle) beginDirectSpawn() bool {
+	if !l.spawnInfoReady || l.spawned || l.state() != PlayerLifeStateDead || l.spawnPhase != spawnPhaseIdle {
+		return false
+	}
+	l.spawnRequestOrigin = PlayerLifeStateDead
+	l.spawnRequested = false
+	l.spawnPhase = spawnPhaseSpawning
+	l.spawnRequestAt = time.Time{}
+	return true
+}
+
 func (l *playerLifecycle) rollbackSpawnRequest(requestID uint64) (PlayerLifeState, bool) {
 	if l.spawnPhase != spawnPhaseRequesting || l.spawnRequestID != requestID {
 		return l.state(), false
@@ -367,7 +382,10 @@ func (c *Client) sendDeathNotification(ctx context.Context, cause DeathCause) er
 		payload.Uint8(cause.Reason)
 		payload.Uint16(cause.KillerID)
 	}
-	return c.sendRPC(ctx, RPCDeath, &payload, raknet.ReliableOrdered)
+	// PC SA-MP uses RELIABLE_SEQUENCED for the death notification. Ordered
+	// reliability can hold this lifecycle edge behind an older packet and does
+	// not match the native client's wire contract.
+	return c.sendRPC(ctx, RPCDeath, &payload, raknet.ReliableSequenced)
 }
 
 func (l *playerLifecycle) scheduleDeathReportRetry(now time.Time) {
@@ -403,8 +421,8 @@ func nextAutoRespawnDelay(previous time.Duration) time.Duration {
 // spawning remains explicit: some servers use their class-selection flow to
 // authorize the first spawn and reject unsolicited RequestSpawn RPCs. The
 // worker is deliberately outside the decoder: it can wait for spawn
-// information, retry a rejected respawn request, and stop as soon as a spawn
-// is committed without complicating RPC parsing.
+// information, retry a failed direct respawn write, and stop as soon as a
+// spawn is committed without complicating RPC parsing.
 func (c *Client) startAutomaticSpawn() {
 	c.stateMu.Lock()
 	state := c.lifecycle.state()
@@ -479,9 +497,9 @@ func (c *Client) runAutomaticSpawn(epoch uint64, initialDelay time.Duration) {
 			return
 		}
 		if ready {
-			// RequestSpawn owns the request/response transaction. A successful
-			// write leaves the lifecycle pending until the server replies; a
-			// rejected write is retried by this bounded backoff loop.
+			// RequestSpawn selects the direct RPC_Spawn path for a dead player,
+			// matching the PC client's death-respawn protocol. A failed write is
+			// retried by this bounded backoff loop.
 			_ = c.RequestSpawn(ctx)
 		}
 		if firstAttempt {
@@ -612,6 +630,11 @@ func (c *Client) reserveDeath() (finalDriverFrame bool, reserved bool) {
 }
 
 func (c *Client) completeDeath(source DeathSource, finalDriverFrame bool, cause DeathCause) {
+	// Keep the final active frame, RPC_Death, and the dead-state transition on
+	// one realtime-sync critical section. Otherwise a concurrent sync tick can
+	// publish an old on-foot/vehicle snapshot after the death notification.
+	c.syncMu.Lock()
+	defer c.syncMu.Unlock()
 	c.deathWireMu.Lock()
 	ctx, cancel := context.WithTimeout(c.contextOrBackground(), deathWriteTimeout)
 	if finalDriverFrame {

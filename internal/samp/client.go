@@ -513,14 +513,15 @@ func (c *Client) RefreshScores(ctx context.Context) error {
 	return c.sendRPC(ctx, RPCUpdateScores, &w, raknet.Reliable)
 }
 
-// RequestSpawn mirrors the Android raksamp spawn request. A class response
-// only supplies spawn information; the server must authorize each spawn
-// transaction through RPC_RequestSpawn before the client sends RPC_Spawn.
-// Keeping that handshake for respawns is more interoperable than assuming the
-// server still has an outstanding spawn authorization after death.
+// RequestSpawn mirrors the two SA-MP spawn paths. During class selection the
+// client asks the server for spawn authorization with RPC_RequestSpawn. After
+// a confirmed death, PC SA-MP keeps the existing spawn information and sends
+// RPC_Spawn directly; repeating RPC_RequestSpawn would incorrectly reopen the
+// class-selection transaction on servers that enforce the native protocol.
 func (c *Client) RequestSpawn(ctx context.Context) error {
 	var requestID uint64
 	var started bool
+	var directRespawn bool
 	c.stateMu.Lock()
 	if !c.lifecycle.spawnInfoReady {
 		c.stateMu.Unlock()
@@ -533,6 +534,32 @@ func (c *Client) RequestSpawn(ctx context.Context) error {
 	if !c.lifecycle.respawnNotBefore.IsZero() && time.Now().Before(c.lifecycle.respawnNotBefore) {
 		c.stateMu.Unlock()
 		return ErrSpawnCooldown
+	}
+	if c.lifecycle.state() == PlayerLifeStateDead {
+		directRespawn = c.lifecycle.beginDirectSpawn()
+		c.stateMu.Unlock()
+		if !directRespawn {
+			return nil
+		}
+		spawned, err := c.sendSpawnAndCommit(ctx)
+		if err != nil {
+			// sendSpawnAndCommit rolls the transaction back so the automatic
+			// policy can retry. This direct API call is outside the RPC decoder,
+			// so flush the rollback event here as well.
+			c.flushPendingEvents()
+			return err
+		}
+		// Keep the same event order as an inbound RPC_RequestSpawn response:
+		// the semantic spawned event precedes the lifecycle state event queued
+		// by markSpawnedLocked.
+		pending := c.drainPendingEvents()
+		batch := make([]Event, 0, len(pending)+1)
+		batch = append(batch, Event{Type: EventSpawned, Data: spawned})
+		batch = append(batch, pending...)
+		c.eventBatchMu.Lock()
+		c.emitBatch(batch)
+		c.eventBatchMu.Unlock()
+		return nil
 	}
 	_, requestID, started = c.lifecycle.beginSpawnRequest(time.Now())
 	if !started {
@@ -2187,6 +2214,7 @@ func (c *Client) continueQueuedVehicleEntry(queuedVehicle uint16, queuedPassenge
 func (c *Client) setSpawnInfo(info SpawnInfo) {
 	c.stateMu.Lock()
 	c.position, c.skin, c.team, c.rotation = info.Position, info.Skin, info.Team, info.Rotation
+	c.onFootQuaternion = yawQuaternion(info.Rotation)
 	c.lifecycle.spawnInfoReady = true
 	changed := false
 	if !c.lifecycle.spawned && c.lifecycle.state() != PlayerLifeStateDead && c.lifecycle.spawnPhase == spawnPhaseIdle {
@@ -2205,10 +2233,15 @@ func (c *Client) markSpawned() SpawnedEvent {
 }
 
 func (c *Client) sendSpawnAndCommit(ctx context.Context) (SpawnedEvent, error) {
+	// Serialize the spawn RPC with the realtime sync stream. The first sync of
+	// a new gameplay epoch must not overtake RPC_Spawn, and no old frame may be
+	// written between the death and respawn transactions.
+	c.syncMu.Lock()
+	defer c.syncMu.Unlock()
 	c.deathWireMu.Lock()
 	defer c.deathWireMu.Unlock()
 	spawn := raknet.Writer{}
-	if err := c.sendRPC(ctx, RPCSpawn, &spawn, raknet.ReliableOrdered); err != nil {
+	if err := c.sendRPC(ctx, RPCSpawn, &spawn, raknet.ReliableSequenced); err != nil {
 		c.rollbackSpawning()
 		return SpawnedEvent{}, err
 	}
@@ -2262,6 +2295,11 @@ func (c *Client) markSpawnedLocked() SpawnedEvent {
 	c.vehicleLRAnalog = 0
 	c.vehicleUDAnalog = 0
 	c.vehicleProtocolKeys = 0
+	c.onFootQuaternion = yawQuaternion(c.rotation)
+	c.onFootSpecialAction = 0
+	c.onFootWeapon = 0
+	c.onFootAnimationID = 0
+	c.onFootAnimationFlags = 0
 	c.clearMotionFrameLocked()
 	event := SpawnedEvent{Health: c.health, Armour: c.armour}
 	c.stateMu.Unlock()
