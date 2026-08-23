@@ -207,7 +207,7 @@ export default function App() {
             <Card className="text-muted-foreground p-4 text-center text-sm">{t('app.empty')}</Card>
           )}
         </div>
-        <aside className="instance-list-scrollbar hidden w-full shrink-0 [scrollbar-gutter:stable] space-y-4 lg:sticky lg:top-24 lg:block lg:max-h-[calc(100dvh-7.5rem)] lg:w-75 lg:overflow-y-auto lg:overscroll-contain lg:pr-2">
+        <aside className="instance-list-scrollbar hidden w-full shrink-0 [scrollbar-gutter:stable] space-y-4 lg:sticky lg:top-24 lg:block lg:max-h-[calc(100dvh-7.5rem)] lg:w-75 lg:overflow-y-auto lg:overscroll-contain lg:py-2 lg:pr-2">
           {items.map((snapshot) => (
             <Card
               key={snapshot.server.id}
