@@ -521,7 +521,7 @@ func TestNativeDeathCauseIsPreservedInEventAndNotification(t *testing.T) {
 func TestAutomaticRespawnSendsDirectSpawn(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	spawned := make(chan struct{})
+	spawnSent := make(chan struct{})
 	var rpcIDs []uint8
 	c := &Client{
 		ctx:           ctx,
@@ -536,7 +536,7 @@ func TestAutomaticRespawnSendsDirectSpawn(t *testing.T) {
 				if reliability != raknet.ReliableSequenced {
 					t.Errorf("spawn reliability = %v, want %v", reliability, raknet.ReliableSequenced)
 				}
-				close(spawned)
+				close(spawnSent)
 			}
 			return nil
 		},
@@ -544,12 +544,27 @@ func TestAutomaticRespawnSendsDirectSpawn(t *testing.T) {
 	c.startAutomaticSpawn()
 	startedAt := time.Now()
 	select {
-	case <-spawned:
+	case <-spawnSent:
 	case <-time.After(4 * time.Second):
 		t.Fatal("automatic respawn did not complete")
 	}
 	if elapsed := time.Since(startedAt); elapsed < autoRespawnAfterDeathDelay {
 		t.Fatalf("automatic respawn started after %s, want at least %s", elapsed, autoRespawnAfterDeathDelay)
+	}
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for {
+		c.stateMu.RLock()
+		state, isSpawned := c.lifecycle.state(), c.lifecycle.spawned
+		c.stateMu.RUnlock()
+		if state == PlayerLifeStateSpawned && isSpawned {
+			break
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("automatic respawn lifecycle = state:%q spawned:%v", state, isSpawned)
+		case <-time.After(time.Millisecond):
+		}
 	}
 	if len(rpcIDs) != 1 || rpcIDs[0] != RPCSpawn {
 		t.Fatalf("automatic respawn RPCs = %v, want [%d]", rpcIDs, RPCSpawn)
