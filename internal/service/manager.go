@@ -397,7 +397,10 @@ func (m *Manager) connect(ctx context.Context, id string, i *instance, s domain.
 		message := retryConnectionMessage(err)
 		i.mu.Lock()
 		i.client = nil
-		i.snap.Connection = domain.Connection{Status: domain.StatusConnecting}
+		i.snap.Connection = domain.Connection{
+			Status: domain.StatusError,
+			Error:  connectionMessage(err),
+		}
 		m.appendChat(i, message, errorChatColor)
 		i.mu.Unlock()
 		m.publish(id, i)
@@ -665,9 +668,12 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 				i.client = nil
 			}
 			if ctx.Err() == nil {
-				i.snap.Connection = domain.Connection{Status: domain.StatusDisconnected}
-				resetConnectionState(i)
 				disconnectErr, _ = event.Data.(error)
+				i.snap.Connection = domain.Connection{
+					Status: domain.StatusError,
+					Error:  connectionMessage(disconnectErr),
+				}
+				resetConnectionState(i)
 			}
 		}
 		i.mu.Unlock()
@@ -696,6 +702,16 @@ func retryConnectionMessage(err error) string {
 }
 func connectionMessage(err error) string {
 	switch {
+	case errors.Is(err, samp.ErrBadVersion):
+		return "Connection rejected: incorrect client version."
+	case errors.Is(err, samp.ErrBadNickname):
+		return "Connection rejected: nickname must be 3-20 characters and use only a-z, A-Z, or 0-9."
+	case errors.Is(err, samp.ErrBadMod):
+		return "Connection rejected: bad client mod version."
+	case errors.Is(err, samp.ErrBadPlayerID):
+		return "Connection rejected: unable to allocate a player slot."
+	case errors.Is(err, samp.ErrConnectionRejected):
+		return "Connection rejected by the server."
 	case errors.Is(err, raknet.ErrServerFull):
 		return "The server is full."
 	case errors.Is(err, raknet.ErrServerClosed):

@@ -29,6 +29,7 @@ const (
 	RPCDeath               uint8  = 53
 	RPCRequestClass        uint8  = 128
 	RPCRequestSpawn        uint8  = 129
+	RPCConnectionRejected  uint8  = 130
 	RPCSpawn               uint8  = 52
 	RPCWorldPlayerAdd      uint8  = 32
 	RPCSetSpawnInfo        uint8  = 68
@@ -130,6 +131,11 @@ type ClientOptions struct {
 
 var (
 	ErrNicknameTooLong        = errors.New("samp: nickname is too long")
+	ErrConnectionRejected     = errors.New("samp: connection rejected")
+	ErrBadVersion             = errors.New("samp: incorrect client version")
+	ErrBadNickname            = errors.New("samp: unacceptable nickname")
+	ErrBadMod                 = errors.New("samp: bad client mod version")
+	ErrBadPlayerID            = errors.New("samp: unable to allocate a player slot")
 	ErrMessageTooLong         = errors.New("samp: message is too long")
 	ErrMalformedPacket        = errors.New("samp: malformed packet")
 	ErrClientNotConnected     = errors.New("samp: client is not connected")
@@ -1293,6 +1299,11 @@ func (c *Client) run() {
 		c.eventBatchMu.Lock()
 		var batch []Event
 		if event, e := c.decodeRPC(rpc); e != nil {
+			if errors.Is(e, ErrConnectionRejected) {
+				c.eventBatchMu.Unlock()
+				c.failConnection(e)
+				return
+			}
 			batch = append(batch, Event{Type: EventProtocolError, Data: fmt.Sprintf("RPC %d (%d bits): %v", rpc.ID, rpc.PayloadBits, e)})
 		} else if event != nil {
 			batch = append(batch, *event)
@@ -1305,6 +1316,16 @@ func (c *Client) run() {
 		// preserves FIFO ordering for observers and plugins.
 		c.startAutomaticSpawn()
 	}
+}
+
+func (c *Client) failConnection(err error) {
+	if c.cancel != nil {
+		c.cancel()
+	}
+	if c.conn != nil {
+		_ = c.conn.Close()
+	}
+	c.stopEventDispatcher(&Event{Type: EventDisconnected, Data: err})
 }
 
 func (c *Client) observeVehicleSync(vehicle VehicleEvent) {
@@ -1631,6 +1652,12 @@ func (c *Client) handleAuth(packet []byte) error {
 func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 	r := raknet.NewReaderBits(rpc.Payload, rpc.PayloadBits)
 	switch rpc.ID {
+	case RPCConnectionRejected:
+		reason, e := r.Uint8()
+		if e != nil {
+			return nil, e
+		}
+		return nil, connectionRejectedError(reason)
 	case RPCInitGame:
 		localPlayerID, e := decodeInitGameLocalPlayerID(r)
 		if e != nil {
@@ -1971,6 +1998,23 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 		return &Event{Type: EventVehicleHealth, Data: VehicleHealthEvent{ID: vehicleID, Health: 0}}, nil
 	}
 	return nil, nil
+}
+
+func connectionRejectedError(reason uint8) error {
+	var specific error
+	switch reason {
+	case 1:
+		specific = ErrBadVersion
+	case 2:
+		specific = ErrBadNickname
+	case 3:
+		specific = ErrBadMod
+	case 4:
+		specific = ErrBadPlayerID
+	default:
+		return fmt.Errorf("%w: reason %d", ErrConnectionRejected, reason)
+	}
+	return fmt.Errorf("%w: %w", ErrConnectionRejected, specific)
 }
 
 func (c *Client) clientCheckMillisecondsLowByte() uint8 {

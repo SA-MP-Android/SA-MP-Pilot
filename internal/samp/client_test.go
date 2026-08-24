@@ -210,6 +210,26 @@ func TestDispatchTimestampedDialogRPC(t *testing.T) {
 	}
 }
 
+func TestDecodeConnectionRejectedReasons(t *testing.T) {
+	tests := []struct {
+		reason uint8
+		want   error
+	}{
+		{1, ErrBadVersion},
+		{2, ErrBadNickname},
+		{3, ErrBadMod},
+		{4, ErrBadPlayerID},
+	}
+	for _, test := range tests {
+		w := raknet.Writer{}
+		w.Uint8(test.reason)
+		_, err := (&Client{}).decodeRPC(raknet.RPC{ID: RPCConnectionRejected, Payload: w.Bytes(), PayloadBits: w.LenBits()})
+		if !errors.Is(err, test.want) || !errors.Is(err, ErrConnectionRejected) {
+			t.Errorf("reason %d error = %v", test.reason, err)
+		}
+	}
+}
+
 func TestClientCheckRejectsTruncatedPayload(t *testing.T) {
 	rpc := raknet.RPC{ID: RPCClientCheck, Payload: []byte{clientCheckMemoryType}, PayloadBits: 8}
 	client := &Client{emulatePCClientCheck: true}

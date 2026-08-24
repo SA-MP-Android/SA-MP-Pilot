@@ -219,7 +219,9 @@ export function Workspace({
             <Settings size={15} />
             {t('common.settings')}
           </Button>
-          {connection.status === STATUS_CONNECTED || connection.status === STATUS_CONNECTING ? (
+          {connection.status === STATUS_CONNECTED ||
+          connection.status === STATUS_CONNECTING ||
+          connection.status === STATUS_ERROR ? (
             <Button variant="outline" onClick={() => api.disconnect(server.id)}>
               {t('common.disconnect')}
             </Button>

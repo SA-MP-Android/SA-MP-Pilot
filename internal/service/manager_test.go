@@ -32,10 +32,18 @@ func TestConnectionMessages(t *testing.T) {
 		err  error
 		want string
 	}{
+		{raknet.ErrAttemptFailed, "The server didn't respond."},
+		{samp.ErrBadVersion, "Connection rejected: incorrect client version."},
+		{samp.ErrBadNickname, "Connection rejected: nickname must be 3-20 characters and use only a-z, A-Z, or 0-9."},
+		{samp.ErrBadMod, "Connection rejected: bad client mod version."},
+		{samp.ErrBadPlayerID, "Connection rejected: unable to allocate a player slot."},
 		{raknet.ErrServerFull, "The server is full."},
+		{raknet.ErrServerClosed, "Server closed the connection."},
+		{raknet.ErrEncryption, "Failed to initialize encryption."},
 		{raknet.ErrBanned, "You are banned from this server."},
 		{raknet.ErrInvalidPassword, "Wrong server password."},
-		{fmt.Errorf("wrapped: %w", raknet.ErrConnectionLost), "Lost connection to the server."},
+		{raknet.ErrConnectionLost, "Lost connection to the server."},
+		{context.DeadlineExceeded, "The server didn't respond."},
 	}
 	for _, test := range tests {
 		if got := connectionMessage(test.err); got != test.want {
