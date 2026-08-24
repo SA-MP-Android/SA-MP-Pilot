@@ -23,6 +23,16 @@ export default {
     click: 'Click',
     confirm: 'Confirm',
   },
+  settings: {
+    title: 'Application settings',
+    description: 'Settings shared by all SA-MP instances in this installation.',
+    gpci: 'GPCI',
+    gpciDescription: 'Client identifier used by servers. The new value takes effect on the next connection.',
+    refreshGpci: 'Refresh GPCI',
+    refreshTitle: 'Refresh GPCI?',
+    refreshMessage: 'A new client identifier will be generated. Existing connections are not affected.',
+    gpciRefreshed: 'GPCI refreshed',
+  },
   server: {
     add: 'Add server',
     edit: 'Server settings',

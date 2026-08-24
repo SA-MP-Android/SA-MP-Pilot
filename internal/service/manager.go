@@ -124,6 +124,14 @@ func (m *Manager) StartAutoConnect() {
 		}
 	}
 }
+
+// RefreshGPCI rotates the global per-installation client identifier. Active
+// clients keep their existing handshake value and use the new value after the
+// next connection attempt.
+func (m *Manager) RefreshGPCI() (string, error) {
+	return m.store.RefreshGPCI()
+}
+
 func (m *Manager) Close() {
 	m.mu.RLock()
 	instances := make([]*instance, 0, len(m.instances))
@@ -409,6 +417,10 @@ func (m *Manager) connect(ctx context.Context, id string, i *instance, s domain.
 
 func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s domain.Server) error {
 	address := net.JoinHostPort(s.Host, strconv.Itoa(s.Port))
+	clientGPCI, err := m.store.EnsureGPCI()
+	if err != nil {
+		return fmt.Errorf("load gpci: %w", err)
+	}
 	client, err := samp.DialClientWithOptions(
 		ctx,
 		address,
@@ -418,6 +430,7 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 		samp.ClientOptions{
 			EmulatePCClientCheck: s.EmulatePCClientCheck,
 			RespawnPolicy:        samp.RespawnPolicyAutomatic,
+			GPCI:                 clientGPCI,
 		},
 	)
 	if err != nil {

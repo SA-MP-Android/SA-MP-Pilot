@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { ChevronRight, Code2, Globe2, Plus, Plug, Radio, Telescope } from 'lucide-react'
+import { ChevronRight, Code2, Globe2, Plus, Plug, Radio, Settings2, Telescope } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Toaster, toast } from 'sonner'
 import '@/i18n'
@@ -25,6 +25,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { ServerForm } from '@/features/instances/server-form'
 import { Workspace } from '@/features/workspace/workspace'
+import { SettingsDialog } from '@/features/settings/settings-dialog'
 import { InstanceSyncController } from '@/lib/instance-sync'
 
 const LazyServerDialog = lazy(() =>
@@ -52,6 +53,7 @@ export default function App() {
   const [items, setItems] = useState<Snapshot[]>([])
   const [selected, setSelected] = useState('')
   const [adding, setAdding] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [pluginsOpen, setPluginsOpen] = useState(false)
   const [pluginsLoaded, setPluginsLoaded] = useState(false)
   const [debugOpen, setDebugOpen] = useState(false)
@@ -157,6 +159,10 @@ export default function App() {
             <p className="text-muted-foreground text-xs">{t('app.subtitle')}</p>
           </div>
           <div className="ml-auto flex items-center gap-2">
+            <Button variant="outline" className="px-2 sm:px-4" onClick={() => setSettingsOpen(true)}>
+              <Settings2 size={16} />
+              <span className="hidden sm:inline">{t('common.settings')}</span>
+            </Button>
             <Button variant="outline" className="px-2 sm:px-4" onClick={openPlugins}>
               <Plug size={16} />
               <span className="hidden sm:inline">{t('plugins.open')}</span>
@@ -270,6 +276,7 @@ export default function App() {
           />
         </DialogContent>
       </Dialog>
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
       {debugLoaded && (
         <Suspense fallback={null}>
           <LazyPluginConsole

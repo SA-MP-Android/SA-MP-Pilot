@@ -5,17 +5,19 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/SA-MP-Android/SA-MP-Pilot/internal/raknet"
 	"golang.org/x/text/encoding"
 	"math"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/SA-MP-Android/SA-MP-Pilot/internal/gpci"
+	"github.com/SA-MP-Android/SA-MP-Pilot/internal/raknet"
 )
 
 const (
 	netGameVersion         uint32 = 4057
 	clientMod              uint8  = 1
-	clientAuth                    = "15121F6F18550C00AC4B4F8A167D0379BB0ACA99043"
 	clientVersion                 = "0.3.7-R4"
 	maxNicknameBytes              = 24
 	maxChatBytes                  = 255
@@ -120,6 +122,10 @@ const (
 type ClientOptions struct {
 	EmulatePCClientCheck bool
 	RespawnPolicy        RespawnPolicy
+	// GPCI is the persisted per-installation client identifier used in the
+	// SA-MP join handshake. An empty value generates a fallback identifier for
+	// callers that do not have access to the application store.
+	GPCI string
 }
 
 var (
@@ -364,6 +370,13 @@ func DialClientWithOptions(ctx context.Context, address, nickname, password, cha
 	if len(encoded) == 0 || len(encoded) > maxNicknameBytes {
 		return nil, ErrNicknameTooLong
 	}
+	clientGPCI := strings.TrimSpace(options.GPCI)
+	if clientGPCI == "" {
+		clientGPCI, e = gpci.Generate()
+		if e != nil {
+			return nil, fmt.Errorf("samp: generate gpci: %w", e)
+		}
+	}
 	conn, e := raknet.Dial(ctx, address, password)
 	if e != nil {
 		return nil, e
@@ -411,7 +424,7 @@ func DialClientWithOptions(ctx context.Context, address, nickname, password, cha
 	payload.Uint8(clientMod)
 	payload.String8(string(encoded))
 	payload.Uint32(challenge)
-	payload.String8(clientAuth)
+	payload.String8(clientGPCI)
 	payload.String8(clientVersion)
 	rpc := raknet.EncodeRPC(RPCClientJoin, payload.Bytes(), payload.LenBits())
 	if e = conn.Write(ctx, rpc, raknet.Reliable); e != nil {

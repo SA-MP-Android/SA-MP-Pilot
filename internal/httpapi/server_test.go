@@ -77,6 +77,32 @@ func TestCreateListDelete(t *testing.T) {
 		t.Fatalf("delete: %d", w.Code)
 	}
 }
+
+func TestRefreshGPCI(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := st.GPCI()
+	h := New(service.New(st), fstest.MapFS{"index.html": {Data: []byte("app")}}, slog.Default())
+	r := httptest.NewRequest(http.MethodPost, "/api/settings/gpci/refresh", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d: %s", w.Code, w.Body.String())
+	}
+	var response struct {
+		GPCI string `json:"gpci"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.GPCI == "" || response.GPCI == initial || st.GPCI() != response.GPCI {
+		t.Fatalf("unexpected refreshed GPCI: initial=%q response=%q stored=%q", initial, response.GPCI, st.GPCI())
+	}
+}
+
 func TestRejectsUnknownFields(t *testing.T) {
 	h := handler(t)
 	r := httptest.NewRequest("POST", "/api/instances", strings.NewReader(`{"unknown":true}`))

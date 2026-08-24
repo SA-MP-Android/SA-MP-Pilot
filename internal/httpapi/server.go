@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -39,6 +40,7 @@ func New(m *service.Manager, assets fs.FS, log *slog.Logger, controllers ...Plug
 	s := &Server{manager: m, assets: assets, log: log, plugins: plugins}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) { write(w, 200, map[string]string{"status": "ok"}) })
+	mux.HandleFunc("POST /api/settings/gpci/refresh", s.refreshGPCI)
 	mux.HandleFunc("GET /api/plugins", s.pluginsList)
 	mux.HandleFunc("POST /api/plugins/{id}/debug", s.pluginDebug)
 	mux.HandleFunc("POST /api/plugins/{id}/start", s.pluginStart)
@@ -66,6 +68,15 @@ func (s *Server) pluginsList(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	write(w, http.StatusOK, s.plugins.List())
+}
+
+func (s *Server) refreshGPCI(w http.ResponseWriter, _ *http.Request) {
+	value, err := s.manager.RefreshGPCI()
+	if err != nil {
+		problem(w, http.StatusInternalServerError, fmt.Sprintf("refresh gpci: %v", err))
+		return
+	}
+	write(w, http.StatusOK, map[string]string{"gpci": value})
 }
 
 func (s *Server) pluginDebug(w http.ResponseWriter, r *http.Request) {

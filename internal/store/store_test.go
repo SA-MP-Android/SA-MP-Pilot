@@ -28,6 +28,49 @@ func TestStorePersistsAtomically(t *testing.T) {
 		t.Fatalf("unexpected: %+v", got)
 	}
 }
+
+func TestStorePersistsGPCIAndRefreshesIt(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "data.json")
+	s, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := s.GPCI()
+	if initial == "" {
+		t.Fatal("GPCI was not generated")
+	}
+
+	refreshed, err := s.RefreshGPCI()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshed == initial || s.GPCI() != refreshed {
+		t.Fatalf("GPCI was not refreshed: initial=%q refreshed=%q stored=%q", initial, refreshed, s.GPCI())
+	}
+
+	again, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.GPCI() != refreshed {
+		t.Fatalf("reopened GPCI = %q, want %q", again.GPCI(), refreshed)
+	}
+}
+
+func TestOpenMigratesLegacyDataWithGPCI(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "data.json")
+	if err := os.WriteFile(p, []byte(`{"servers":[],"commands":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.GPCI() == "" {
+		t.Fatal("legacy data did not receive a GPCI")
+	}
+}
+
 func TestStoreRollback(t *testing.T) {
 	s, _ := Open(filepath.Join(t.TempDir(), "data.json"))
 	want := assertErr{}

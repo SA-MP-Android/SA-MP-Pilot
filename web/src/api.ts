@@ -154,6 +154,7 @@ export const api = {
   },
   action: (id: string, action: string, data: unknown = {}) =>
     request<void>(`${instancePath(id)}/actions/${action}`, { method: 'POST', body: JSON.stringify(data) }),
+  refreshGpci: () => request<{ gpci: string }>('/settings/gpci/refresh', { method: 'POST' }),
   plugins: () => request<PluginInfo[]>('/plugins', { cache: 'no-store' }),
   debugPlugin: (id: string, instanceId: string, code: string) =>
     request<PluginDebugResult>(`/plugins/${encodeURIComponent(id)}/debug`, {

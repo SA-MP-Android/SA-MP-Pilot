@@ -23,6 +23,16 @@ export default {
     click: '点击',
     confirm: '确定',
   },
+  settings: {
+    title: '应用设置',
+    description: '此安装中的所有 SA-MP 实例共享这些设置。',
+    gpci: 'GPCI',
+    gpciDescription: '服务器用于识别客户端的标识。新值将在下次连接时生效。',
+    refreshGpci: '刷新 GPCI',
+    refreshTitle: '刷新 GPCI？',
+    refreshMessage: '将生成新的客户端标识。现有连接不会受到影响。',
+    gpciRefreshed: 'GPCI 已刷新',
+  },
   server: {
     add: '添加服务器',
     edit: '服务器设置',
