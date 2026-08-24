@@ -49,6 +49,8 @@ const (
 	maxCommandTextBytes             = 1024
 )
 
+var serverInfoRefreshInterval = 5 * time.Second
+
 type instance struct {
 	mu        sync.RWMutex
 	snap      domain.Snapshot
@@ -77,6 +79,7 @@ type Manager struct {
 	syncEpoch         string
 	pluginMu          sync.RWMutex
 	pluginSink        plugin.EventSink
+	queryServerInfo   func(context.Context, string, int) (samp.Info, error)
 }
 
 type Option func(*Manager)
@@ -94,7 +97,7 @@ func (m *Manager) SetPluginSink(sink plugin.EventSink) {
 }
 
 func New(st *store.Store, options ...Option) *Manager {
-	m := &Manager{instances: map[string]*instance{}, store: st, subscribers: map[*subscriber]struct{}{}, pluginSubscribers: map[*pluginSubscriber]struct{}{}, syncEpoch: uuid.NewString()}
+	m := &Manager{instances: map[string]*instance{}, store: st, subscribers: map[*subscriber]struct{}{}, pluginSubscribers: map[*pluginSubscriber]struct{}{}, syncEpoch: uuid.NewString(), queryServerInfo: samp.Query}
 	for _, option := range options {
 		option(m)
 	}
@@ -447,7 +450,8 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 	}
 	i.client = client
 	i.mu.Unlock()
-	info, _ := samp.Query(ctx, s.Host, s.Port)
+	info, _ := m.queryServerInfo(ctx, s.Host, s.Port)
+	go m.refreshServerInfo(ctx, id, i, client, s)
 	var disconnectErr error
 	for event := range client.Events() {
 		// Apply the event to the in-memory snapshot before notifying plugins.
@@ -686,6 +690,43 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 		return ctx.Err()
 	}
 	return disconnectErr
+}
+
+// refreshServerInfo keeps the server-reported player totals current while the
+// gameplay connection is alive. The SA-MP protocol sends join/quit events for
+// individual players, but those events do not carry the server's max-player
+// value and cannot be relied on as a complete server count.
+func (m *Manager) refreshServerInfo(ctx context.Context, id string, i *instance, client *samp.Client, s domain.Server) {
+	ticker := time.NewTicker(serverInfoRefreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			info, err := m.queryServerInfo(ctx, s.Host, s.Port)
+			if err != nil {
+				continue
+			}
+
+			i.mu.Lock()
+			if ctx.Err() != nil || i.client != client {
+				i.mu.Unlock()
+				return
+			}
+			if i.snap.Connection.Status != domain.StatusConnected {
+				i.mu.Unlock()
+				continue
+			}
+			changed := i.snap.Connection.PlayerCount != info.Players || i.snap.Connection.MaxPlayers != info.MaxPlayers
+			i.snap.Connection.PlayerCount = info.Players
+			i.snap.Connection.MaxPlayers = info.MaxPlayers
+			i.mu.Unlock()
+			if changed {
+				m.publish(id, i)
+			}
+		}
+	}
 }
 
 func retryConnectionMessage(err error) string {

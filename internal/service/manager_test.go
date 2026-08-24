@@ -595,6 +595,49 @@ func TestPublishEmitsOnlyChangedSnapshotFieldsWithSequentialRevision(t *testing.
 	}
 }
 
+func TestRefreshServerInfoUpdatesConnectedInstance(t *testing.T) {
+	oldInterval := serverInfoRefreshInterval
+	serverInfoRefreshInterval = time.Millisecond
+	defer func() { serverInfoRefreshInterval = oldInterval }()
+
+	client := &samp.Client{}
+	i := &instance{
+		client: client,
+		snap: domain.Snapshot{
+			Server:     domain.Server{ID: "instance"},
+			Connection: domain.Connection{Status: domain.StatusConnected, PlayerCount: 1, MaxPlayers: 50},
+		},
+	}
+	m := &Manager{
+		queryServerInfo: func(context.Context, string, int) (samp.Info, error) {
+			return samp.Info{Players: 23, MaxPlayers: 100}, nil
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		m.refreshServerInfo(ctx, "instance", i, client, domain.Server{Host: "127.0.0.1", Port: 7777})
+		close(done)
+	}()
+
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for {
+		connection := i.snapshot().Connection
+		if connection.PlayerCount == 23 && connection.MaxPlayers == 100 {
+			break
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("server info was not refreshed: %+v", connection)
+		case <-time.After(time.Millisecond):
+		}
+	}
+
+	cancel()
+	<-done
+}
+
 func TestEntityCollectionsStopAtProtocolLimits(t *testing.T) {
 	players := make([]domain.Player, domain.MaxPlayers)
 	vehicles := make([]domain.Vehicle, domain.MaxVehicles)
