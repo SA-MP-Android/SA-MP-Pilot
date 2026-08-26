@@ -8,6 +8,12 @@ import { Workspace } from './features/workspace/workspace'
 import { api } from './api'
 import type { Snapshot } from './types'
 
+globalThis.ResizeObserver ??= class {
+  disconnect() {}
+  observe() {}
+  unobserve() {}
+} as unknown as typeof ResizeObserver
+
 afterEach(cleanup)
 
 const snapshot: Snapshot = {

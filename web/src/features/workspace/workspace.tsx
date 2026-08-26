@@ -170,7 +170,7 @@ export function Workspace({
   )
 
   return (
-    <Card className="flex h-[calc(100dvh-7rem)] min-h-0 min-w-0 flex-col overflow-hidden shadow-lg sm:h-[calc(100dvh-8.5rem)] sm:min-h-144">
+    <Card className="flex min-h-[42rem] min-w-0 flex-col shadow-lg lg:h-[calc(100dvh-8.5rem)] lg:min-h-144 lg:overflow-hidden">
       <CardHeader className="flex-row flex-wrap items-center gap-3 space-y-0 border-b p-3 sm:p-5">
         <div className="min-w-0">
           <CardTitle>{connection.serverName || `${server.host}:${server.port}`}</CardTitle>
@@ -281,6 +281,7 @@ export function Workspace({
         </TabsList>
         <TabsContent value={TAB_CHAT} className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
           <ScrollArea
+            type="always"
             viewportRef={chatViewportRef}
             onViewportScroll={(event) => {
               const viewport = event.currentTarget
@@ -288,7 +289,7 @@ export function Workspace({
               followChatRef.current =
                 viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= CHAT_BOTTOM_TOLERANCE_PX
             }}
-            className="min-h-0 flex-1 rounded-lg border p-3"
+            className="h-[28rem] min-h-80 flex-none rounded-lg border p-3 sm:h-[32rem] lg:h-auto lg:min-h-0 lg:flex-1"
           >
             <div className="space-y-1 font-mono text-sm">
               {value.chat.map((entry) => (
