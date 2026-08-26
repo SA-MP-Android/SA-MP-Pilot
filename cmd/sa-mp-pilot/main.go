@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -24,12 +25,23 @@ var version = "dev"
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "HTTP listen address")
+	authUser := flag.String("auth-user", os.Getenv("SAMP_PILOT_AUTH_USER"), "HTTP Basic Auth username (overrides SAMP_PILOT_AUTH_USER)")
+	authPassword := flag.String("auth-password", os.Getenv("SAMP_PILOT_AUTH_PASSWORD"), "HTTP Basic Auth password (overrides SAMP_PILOT_AUTH_PASSWORD)")
+	insecure := flag.Bool("insecure", false, "disable HTTP Basic Auth and allow non-loopback listen addresses (unsafe)")
 	data := flag.String("data", "", "data directory")
 	web := flag.String("web", "", "frontend directory")
 	pluginDir := flag.String("plugins", "", "plugin directory")
 	flag.Parse()
-	if !isLoopbackListenAddress(*addr) {
-		slog.Error("refusing to expose unauthenticated HTTP API outside loopback", "address", *addr)
+	if (*authUser == "") != (*authPassword == "") {
+		slog.Error("HTTP Basic Auth requires both -auth-user and -auth-password")
+		os.Exit(1)
+	}
+	auth := httpapi.BasicAuthConfig{Username: *authUser, Password: *authPassword}
+	if *insecure {
+		auth = httpapi.BasicAuthConfig{}
+	}
+	if err := validateListenSecurity(*addr, *insecure, auth.Enabled()); err != nil {
+		slog.Error("refusing HTTP listen configuration", "address", *addr, "error", err)
 		os.Exit(1)
 	}
 	runtimeDir, e := executableDirectory()
@@ -69,7 +81,10 @@ func main() {
 	if *web != "" {
 		assets = os.DirFS(*web)
 	}
-	srv := &http.Server{Addr: *addr, Handler: httpapi.New(manager, assets, log, pluginHost), ReadHeaderTimeout: 5 * time.Second}
+	if *insecure {
+		log.Warn("HTTP Basic Auth is disabled; the HTTP server is unauthenticated", "address", *addr)
+	}
+	srv := &http.Server{Addr: *addr, Handler: httpapi.NewWithAuth(manager, assets, log, auth, pluginHost), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		log.Info("SA-MP-Pilot listening", "version", version, "address", "http://"+*addr)
 		if e := srv.ListenAndServe(); e != nil && e != http.ErrServerClosed {
@@ -83,6 +98,13 @@ func main() {
 	shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutdown)
+}
+
+func validateListenSecurity(address string, insecure, authEnabled bool) error {
+	if insecure || authEnabled || isLoopbackListenAddress(address) {
+		return nil
+	}
+	return fmt.Errorf("non-loopback addresses require HTTP Basic Auth or -insecure")
 }
 
 func isLoopbackListenAddress(address string) bool {

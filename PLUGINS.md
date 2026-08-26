@@ -286,6 +286,6 @@ The host limits each plugin to a 256-message outbound queue, 1 MiB protocol mess
 
 ## Security boundary
 
-Plugins run with the same operating-system permissions as SA-MP-Pilot. They can read/write files, access the network, and start other processes. There is currently no sandbox, signature verification, marketplace, or per-plugin permission isolation. The browser debug console executes code inside the selected plugin process and is only suitable for trusted local users. The executable refuses non-loopback HTTP listen addresses because these endpoints are not remotely authenticated.
+Plugins run with the same operating-system permissions as SA-MP-Pilot. They can read/write files, access the network, and start other processes. There is currently no sandbox, signature verification, marketplace, or per-plugin permission isolation. The browser debug console executes code inside the selected plugin process and is only suitable for trusted local users. Basic Auth credentials must be used over HTTPS or another trusted/private transport because Basic Auth itself is not encryption.
 
 Only install and run plugins you trust.

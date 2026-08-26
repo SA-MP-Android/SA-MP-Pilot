@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -33,6 +34,19 @@ type PluginController interface {
 }
 
 func New(m *service.Manager, assets fs.FS, log *slog.Logger, controllers ...PluginController) http.Handler {
+	return NewWithAuth(m, assets, log, BasicAuthConfig{}, controllers...)
+}
+
+type BasicAuthConfig struct {
+	Username string
+	Password string
+}
+
+func (c BasicAuthConfig) Enabled() bool {
+	return c.Username != "" || c.Password != ""
+}
+
+func NewWithAuth(m *service.Manager, assets fs.FS, log *slog.Logger, auth BasicAuthConfig, controllers ...PluginController) http.Handler {
 	var plugins PluginController
 	if len(controllers) > 0 {
 		plugins = controllers[0]
@@ -59,7 +73,7 @@ func New(m *service.Manager, assets fs.FS, log *slog.Logger, controllers ...Plug
 	mux.HandleFunc("POST /api/instances/{id}/actions/{action}", s.action)
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.Handle("/", spa(assets))
-	return security(mux)
+	return security(mux, auth)
 }
 
 func (s *Server) pluginsList(w http.ResponseWriter, _ *http.Request) {
@@ -327,7 +341,10 @@ func problem(w http.ResponseWriter, status int, msg string) {
 	write(w, status, map[string]string{"error": msg})
 }
 func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
-func security(next http.Handler) http.Handler {
+func security(next http.Handler, auth BasicAuthConfig) http.Handler {
+	if auth.Enabled() {
+		next = basicAuth(next, auth)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
@@ -335,6 +352,26 @@ func security(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+func basicAuth(next http.Handler, auth BasicAuthConfig) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		username, password, ok := r.BasicAuth()
+		if !ok || !constantTimeEqual(username, auth.Username) || !constantTimeEqual(password, auth.Password) {
+			w.Header().Set("WWW-Authenticate", `Basic realm="SA-MP-Pilot"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func constantTimeEqual(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
 func spa(root fs.FS) http.Handler {
 	files := http.FileServer(http.FS(root))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

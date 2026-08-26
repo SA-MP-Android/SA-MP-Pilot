@@ -52,13 +52,27 @@ make build
 ./bin/sa-mp-pilot
 ```
 
+To allow access from another device, configure HTTP Basic Auth and bind to a non-loopback address. Environment variables keep the password out of the process argument list:
+
+```sh
+SAMP_PILOT_AUTH_USER=admin SAMP_PILOT_AUTH_PASSWORD='change-this-password' \
+  ./bin/sa-mp-pilot -addr 0.0.0.0:8080
+```
+
+The `-auth-user` and `-auth-password` options are also available and override their corresponding environment variables.
+
+For trusted networks only, `-insecure` disables Basic Auth and allows any listen address. This is unsafe and should not be used with an exposed or untrusted network.
+
 The build output is [`bin/sa-mp-pilot`](bin/sa-mp-pilot). The frontend is embedded, so the executable can be started from any working directory.
 
 ## Command-Line Options
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `-addr` | `127.0.0.1:8080` | HTTP listen address; non-loopback addresses are rejected because the API is unauthenticated |
+| `-addr` | `127.0.0.1:8080` | HTTP listen address; non-loopback addresses require Basic Auth unless `-insecure` is set |
+| `-auth-user` | `SAMP_PILOT_AUTH_USER` | HTTP Basic Auth username; required together with `-auth-password` for non-loopback addresses |
+| `-auth-password` | `SAMP_PILOT_AUTH_PASSWORD` | HTTP Basic Auth password; required together with `-auth-user` for non-loopback addresses |
+| `-insecure` | `false` | Disable HTTP Basic Auth and allow any listen address; unsafe |
 | `-data` | Executable directory | Directory for data files, logs, and the default plugin directory |
 | `-web` | Embedded assets | Use frontend assets from an external directory, useful during development |
 | `-plugins` | `<data>/plugins` | Plugin directory |
@@ -81,7 +95,7 @@ The repository includes an example plugin at [`examples/plugins/auto-spawn`](exa
 ./bin/sa-mp-pilot -plugins examples/plugins
 ```
 
-Changes to `plugin.json` or source files automatically restart a running plugin. Unexpected plugin exits are automatically restarted by default with bounded backoff. New and removed plugin directories are detected while the application is running. Plugins are trusted local code; the current version does not provide a permission model or a plugin marketplace. The HTTP API, including plugin debugging and lifecycle control, is intentionally restricted to loopback addresses.
+Changes to `plugin.json` or source files automatically restart a running plugin. Unexpected plugin exits are automatically restarted by default with bounded backoff. New and removed plugin directories are detected while the application is running. Plugins are trusted local code; the current version does not provide a permission model or a plugin marketplace. The HTTP API, including plugin debugging and lifecycle control, is restricted to loopback addresses by default and requires Basic Auth for remote listen addresses unless `-insecure` is explicitly set.
 
 ## Project Structure
 

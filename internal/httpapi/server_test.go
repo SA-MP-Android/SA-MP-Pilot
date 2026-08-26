@@ -44,6 +44,51 @@ func handler(t *testing.T) http.Handler {
 	assets := fstest.MapFS{"index.html": {Data: []byte("app")}}
 	return New(service.New(st), fs.FS(assets), slog.Default())
 }
+
+func authHandler(t *testing.T) http.Handler {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "d.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assets := fstest.MapFS{"index.html": {Data: []byte("app")}}
+	return NewWithAuth(service.New(st), fs.FS(assets), slog.Default(), BasicAuthConfig{
+		Username: "admin",
+		Password: "correct horse battery staple",
+	})
+}
+
+func TestBasicAuth(t *testing.T) {
+	h := authHandler(t)
+	tests := []struct {
+		name       string
+		username   string
+		password   string
+		statusCode int
+	}{
+		{name: "missing", statusCode: http.StatusUnauthorized},
+		{name: "wrong username", username: "user", password: "correct horse battery staple", statusCode: http.StatusUnauthorized},
+		{name: "wrong password", username: "admin", password: "wrong", statusCode: http.StatusUnauthorized},
+		{name: "valid", username: "admin", password: "correct horse battery staple", statusCode: http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+			if tt.username != "" || tt.password != "" {
+				r.SetBasicAuth(tt.username, tt.password)
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != tt.statusCode {
+				t.Fatalf("got status %d, want %d", w.Code, tt.statusCode)
+			}
+			if tt.statusCode == http.StatusUnauthorized && w.Header().Get("WWW-Authenticate") != `Basic realm="SA-MP-Pilot"` {
+				t.Fatalf("WWW-Authenticate = %q", w.Header().Get("WWW-Authenticate"))
+			}
+		})
+	}
+}
+
 func TestCreateListDelete(t *testing.T) {
 	h := handler(t)
 	body := `{"host":"127.0.0.1","port":7777,"nickname":"web","password":"","encoding":"utf-8","autoConnect":false}`
