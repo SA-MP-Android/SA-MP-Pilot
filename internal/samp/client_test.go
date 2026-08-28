@@ -71,6 +71,115 @@ func TestEncodePassengerLayout(t *testing.T) {
 	}
 }
 
+func TestRespondDialogUsesWindows1251Encoding(t *testing.T) {
+	var gotID uint8
+	var gotPayload []byte
+	var gotReliability raknet.Reliability
+	c := &Client{
+		codec: codecFor("windows-1251"),
+		rpcSender: func(_ context.Context, id uint8, payload []byte, _ int, reliability raknet.Reliability) error {
+			gotID = id
+			gotPayload = append([]byte(nil), payload...)
+			gotReliability = reliability
+			return nil
+		},
+	}
+
+	if err := c.RespondDialog(context.Background(), 17, 1, -1, "€"); err != nil {
+		t.Fatal(err)
+	}
+	if gotID != RPCDialogResponse {
+		t.Fatalf("RPC id = %d, want %d", gotID, RPCDialogResponse)
+	}
+	if gotReliability != raknet.ReliableOrdered {
+		t.Fatalf("reliability = %v, want %v", gotReliability, raknet.ReliableOrdered)
+	}
+	r := raknet.NewReader(gotPayload)
+	id, err := r.Int16()
+	if err != nil {
+		t.Fatal(err)
+	}
+	button, err := r.Uint8()
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := r.Int16()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := r.String8()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != 17 || button != 1 || item != -1 || input != string([]byte{0x88}) {
+		t.Fatalf("dialog response = id:%d button:%d item:%d input:%v, want id:17 button:1 item:-1 input:[0x88]", id, button, item, []byte(input))
+	}
+}
+
+func TestRespondDialogUsesGBKEncoding(t *testing.T) {
+	var gotPayload []byte
+	c := &Client{
+		codec: codecFor("gbk"),
+		rpcSender: func(_ context.Context, _ uint8, payload []byte, _ int, _ raknet.Reliability) error {
+			gotPayload = append([]byte(nil), payload...)
+			return nil
+		},
+	}
+
+	if err := c.RespondDialog(context.Background(), 17, 1, 0, "中文"); err != nil {
+		t.Fatal(err)
+	}
+	r := raknet.NewReader(gotPayload)
+	if _, err := r.Int16(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Uint8(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Int16(); err != nil {
+		t.Fatal(err)
+	}
+	input, err := r.String8()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input != string([]byte{0xd6, 0xd0, 0xce, 0xc4}) {
+		t.Fatalf("encoded input = %v, want [0xd6 0xd0 0xce 0xc4]", []byte(input))
+	}
+}
+
+func TestRespondDialogReplacesUnsupportedRune(t *testing.T) {
+	var gotPayload []byte
+	c := &Client{
+		codec: codecFor("windows-1251"),
+		rpcSender: func(_ context.Context, _ uint8, payload []byte, _ int, _ raknet.Reliability) error {
+			gotPayload = append([]byte(nil), payload...)
+			return nil
+		},
+	}
+
+	if err := c.RespondDialog(context.Background(), 17, 1, 0, "中文"); err != nil {
+		t.Fatalf("RespondDialog returned error for unsupported rune: %v", err)
+	}
+	r := raknet.NewReader(gotPayload)
+	if _, err := r.Int16(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Uint8(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Int16(); err != nil {
+		t.Fatal(err)
+	}
+	input, err := r.String8()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(input) != 2 {
+		t.Fatalf("encoded input length = %d, want 2 replacement bytes", len(input))
+	}
+}
+
 func TestEncodeVehicleLayout(t *testing.T) {
 	payload := encodeVehicleFrame(vehicleFrame{
 		vehicleID: 42, quaternion: [4]float32{1, 0, 0, 0},

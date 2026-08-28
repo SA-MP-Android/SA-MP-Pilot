@@ -254,3 +254,20 @@ func TestSequenceComparisonWraps(t *testing.T) {
 		t.Fatal("sequence wrap comparison is incorrect")
 	}
 }
+
+func TestOutgoingOrderedAndSequencedStreamsAreIndependent(t *testing.T) {
+	c := &Conn{}
+
+	if got := c.nextOrderingIndex(ReliableSequenced, 0); got != 0 {
+		t.Fatalf("first sequenced index = %d, want 0", got)
+	}
+	if got := c.nextOrderingIndex(ReliableOrdered, 0); got != 0 {
+		t.Fatalf("first ordered index = %d, want 0", got)
+	}
+	if got := c.nextOrderingIndex(UnreliableSequenced, 0); got != 1 {
+		t.Fatalf("second sequenced index = %d, want 1", got)
+	}
+	if got := c.nextOrderingIndex(ReliableOrdered, 0); got != 1 {
+		t.Fatalf("second ordered index = %d, want 1", got)
+	}
+}

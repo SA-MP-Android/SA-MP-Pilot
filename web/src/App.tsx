@@ -259,7 +259,10 @@ export default function App() {
       </main>
       {!adding && current?.activeDialog && (
         <Suspense fallback={null}>
-          <LazyServerDialog key={`${current.server.id}:${current.activeDialog.id}`} value={current} />
+          <LazyServerDialog
+            key={`${current.server.id}:${current.activeDialog.id}:${current.activeDialog.receivedAt}`}
+            value={current}
+          />
         </Suspense>
       )}
       <Dialog open={adding} onOpenChange={setAdding}>

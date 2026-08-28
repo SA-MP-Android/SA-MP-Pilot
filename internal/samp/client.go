@@ -235,7 +235,6 @@ type DialogEvent struct {
 	ID                               int16
 	Style                            uint8
 	Title, Button1, Button2, Message string
-	RawMessage                       []byte
 }
 type TextDrawEvent struct {
 	ID                                                     uint16
@@ -502,6 +501,9 @@ func (c *Client) SendCommand(ctx context.Context, command string) error {
 	return c.sendRPC(ctx, RPCServerCommand, &w, raknet.Reliable)
 }
 func (c *Client) RespondDialog(ctx context.Context, id int16, button uint8, item int16, input string) error {
+	// Keep dialog input as UTF-8 until the final RPC field, then encode it with
+	// the charset configured for this connection, matching the reference
+	// Android client's Encoding::utf2cp path.
 	encoded, e := encodeText(c.codec, input)
 	if e != nil {
 		return e
@@ -514,17 +516,6 @@ func (c *Client) RespondDialog(ctx context.Context, id int16, button uint8, item
 	w.Uint8(button)
 	w.Int16(item)
 	w.String8(string(encoded))
-	return c.sendRPC(ctx, RPCDialogResponse, &w, raknet.ReliableOrdered)
-}
-func (c *Client) RespondDialogBytes(ctx context.Context, id int16, button uint8, item int16, input []byte) error {
-	if len(input) > maxDialogInputBytes {
-		return ErrMessageTooLong
-	}
-	w := raknet.Writer{}
-	w.Int16(id)
-	w.Uint8(button)
-	w.Int16(item)
-	w.String8(string(input))
 	return c.sendRPC(ctx, RPCDialogResponse, &w, raknet.ReliableOrdered)
 }
 func (c *Client) RefreshScores(ctx context.Context) error {
@@ -2588,7 +2579,7 @@ func decodeDialog(r *raknet.Reader, codec encoding.Encoding) (DialogEvent, error
 	if e != nil {
 		return DialogEvent{}, e
 	}
-	return DialogEvent{ID: id, Style: style, Title: decodeText(codec, []byte(title)), Button1: decodeText(codec, []byte(b1)), Button2: decodeText(codec, []byte(b2)), Message: decodeText(codec, message), RawMessage: append([]byte(nil), message...)}, nil
+	return DialogEvent{ID: id, Style: style, Title: decodeText(codec, []byte(title)), Button1: decodeText(codec, []byte(b1)), Button2: decodeText(codec, []byte(b2)), Message: decodeText(codec, message)}, nil
 }
 func (c *Client) emit(e Event) {
 	c.emitBatch([]Event{e})

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/api'
@@ -24,6 +24,8 @@ export function ServerDialog({ value }: { value: Snapshot }) {
   const dialog = value.activeDialog
   const [input, setInput] = useState('')
   const [item, setItem] = useState(-1)
+  const lastListClick = useRef<{ item: number; at: number }>({ item: -1, at: 0 })
+  const responseStarted = useRef(false)
   const rows = useMemo(
     () =>
       (dialog?.message ?? '')
@@ -45,28 +47,41 @@ export function ServerDialog({ value }: { value: Snapshot }) {
 
   useEffect(() => {
     setInput('')
-    setItem(isList && selectableRows.length ? 0 : -1)
+    setItem(isList && selectableRows.length > 0 ? 0 : -1)
+    lastListClick.current = { item: -1, at: 0 }
+    responseStarted.current = false
   }, [dialog?.id, dialog?.receivedAt, isList, selectableRows.length])
 
   if (!dialog) return null
   const act = (action: string, data: unknown = {}) =>
     api.action(value.server.id, action, data).catch((error) => toast.error(error.message))
-  const selectedRow = item >= 0 ? (selectableRows[item] ?? '') : ''
-  const selectedInput = stripSAMPColors(isTable ? selectedRow.split('\t')[0] : selectedRow)
-  const respond = (buttonId: number) =>
-    act(ACTION_DIALOG, {
-      dialogId: dialog.id,
+  const dialogIdentity = { dialogId: dialog.id, dialogReceivedAt: dialog.receivedAt }
+  const defer = () => act(ACTION_DEFER_DIALOG, dialogIdentity)
+  const respond = (buttonId: number, selectedItem = item) => {
+    if (responseStarted.current) return Promise.resolve()
+    responseStarted.current = true
+    const responseItem =
+      isList && selectableRows.length > 0
+        ? selectedItem >= 0 && selectedItem < selectableRows.length
+          ? selectedItem
+          : 0
+        : -1
+    const selectedRow = responseItem >= 0 ? (selectableRows[responseItem] ?? '') : ''
+    const selectedInput = stripSAMPColors(isTable ? (selectedRow.split('\t')[0] ?? '') : selectedRow)
+    return act(ACTION_DIALOG, {
+      ...dialogIdentity,
       buttonId,
-      listItem: item,
+      listItem: responseItem,
       inputText:
         dialog.style === DIALOG_STYLE_INPUT || dialog.style === DIALOG_STYLE_PASSWORD ? input : selectedInput,
     })
+  }
 
   return (
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open) void act(ACTION_DEFER_DIALOG)
+        if (!open && !responseStarted.current) void defer()
       }}
     >
       <DialogContent className="sm:max-w-xl">
@@ -100,7 +115,14 @@ export function ServerDialog({ value }: { value: Snapshot }) {
                       : 'h-auto w-full justify-start py-2 text-left whitespace-pre-wrap'
                   }
                   style={gridStyle}
-                  onClick={() => setItem(index)}
+                  onClick={() => {
+                    const now = Date.now()
+                    const doubleClick =
+                      lastListClick.current.item === index && now - lastListClick.current.at < 350
+                    lastListClick.current = { item: index, at: now }
+                    setItem(index)
+                    if (doubleClick) void respond(1, index)
+                  }}
                 >
                   {isTable ? (
                     row.split('\t').map((cell, column) => (
@@ -130,7 +152,7 @@ export function ServerDialog({ value }: { value: Snapshot }) {
           />
         )}
         <div className="flex flex-wrap justify-end gap-2">
-          <Button variant="ghost" onClick={() => act(ACTION_DEFER_DIALOG)}>
+          <Button variant="ghost" onClick={() => defer()}>
             {t('dialogs.defer')}
           </Button>
           {dialog.button2 && (

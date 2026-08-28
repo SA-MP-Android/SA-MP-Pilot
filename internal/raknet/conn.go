@@ -92,21 +92,27 @@ type receiverState struct {
 func newReceiverState() *receiverState { return &receiverState{splits: map[uint16]*splitAssembly{}} }
 
 type Conn struct {
-	udp          *net.UDPConn
-	ctx          context.Context
-	cancel       context.CancelFunc
-	disconnect   chan struct{}
-	send         chan outbound
-	recv         chan []byte
-	ready        chan error
-	done         chan struct{}
-	accepted     []byte
-	remotePort   uint16
-	remoteIPv4   [4]byte
-	nextOrdering [maxOrderingChannel + 1]uint16
-	closeOnce    sync.Once
-	terminalMu   sync.RWMutex
-	terminalErr  error
+	udp        *net.UDPConn
+	ctx        context.Context
+	cancel     context.CancelFunc
+	disconnect chan struct{}
+	send       chan outbound
+	recv       chan []byte
+	ready      chan error
+	done       chan struct{}
+	accepted   []byte
+	remotePort uint16
+	remoteIPv4 [4]byte
+	// RakNet maintains independent ordering-index streams for
+	// RELIABLE_ORDERED and the sequenced reliabilities.  They share the same
+	// ordering channel number on the wire, but a sequenced packet must not
+	// advance the RELIABLE_ORDERED stream (or the peer will wait forever for
+	// ordered index 0).
+	nextOrdered   [maxOrderingChannel + 1]uint16
+	nextSequenced [maxOrderingChannel + 1]uint16
+	closeOnce     sync.Once
+	terminalMu    sync.RWMutex
+	terminalErr   error
 }
 
 func Dial(ctx context.Context, address, password string) (*Conn, error) {
@@ -534,8 +540,7 @@ func (c *Conn) AcceptedPacket() []byte { return append([]byte(nil), c.accepted..
 func (c *Conn) queueFrame(payload []byte, reliability Reliability, channel uint8, next *uint16, pending map[uint16]*pendingFrame) error {
 	frame := Frame{MessageNumber: *next, Reliability: reliability, OrderingChannel: channel, Payload: payload, PayloadBits: len(payload) * 8}
 	if reliability.ordered() {
-		frame.OrderingIndex = c.nextOrdering[channel]
-		c.nextOrdering[channel]++
+		frame.OrderingIndex = c.nextOrderingIndex(reliability, channel)
 	}
 	*next++
 	data, e := EncodeDatagram(nil, []Frame{frame})
@@ -549,6 +554,17 @@ func (c *Conn) queueFrame(payload []byte, reliability Reliability, channel uint8
 		pending[frame.MessageNumber] = &pendingFrame{frame: frame, sent: time.Now(), attempts: 1}
 	}
 	return nil
+}
+
+func (c *Conn) nextOrderingIndex(reliability Reliability, channel uint8) uint16 {
+	if reliability == ReliableOrdered {
+		index := c.nextOrdered[channel]
+		c.nextOrdered[channel]++
+		return index
+	}
+	index := c.nextSequenced[channel]
+	c.nextSequenced[channel]++
+	return index
 }
 func (c *Conn) writeDatagram(data []byte) (int, error) {
 	n, err := c.udp.Write(encodeSAMPDatagram(data, c.remotePort))

@@ -136,7 +136,6 @@ type Dialog struct {
 	Button1    string    `json:"button1"`
 	Button2    string    `json:"button2"`
 	ReceivedAt time.Time `json:"receivedAt"`
-	RawMessage []byte    `json:"-"`
 }
 type QuickCommand struct {
 	ID       string `json:"id"`

@@ -231,21 +231,6 @@ func TestSpawnedEventPublishesResetHealthToPlugins(t *testing.T) {
 	}
 }
 
-func TestRawDialogListInputPreservesServerEncodingAndTableOrder(t *testing.T) {
-	dialog := &domain.Dialog{
-		Style:      dialogStyleTabListHeaders,
-		RawMessage: []byte("Header\tValue\n{FF0000}First\tA\n\x80Second\tB"),
-	}
-	got, ok := rawDialogListInput(dialog, 1)
-	if !ok {
-		t.Fatal("dialog was not recognized as a list")
-	}
-	want := []byte("\x80Second")
-	if !bytes.Equal(got, want) {
-		t.Fatalf("raw input = %v, want %v", got, want)
-	}
-}
-
 func TestSortPlayersPlacesLocalPlayerFirstAndOthersByID(t *testing.T) {
 	players := []domain.Player{{ID: 8}, {ID: 3}, {ID: 7}, {ID: 2}}
 	got := sortPlayers(players, 3)
@@ -299,13 +284,10 @@ func TestPluginClientEventsUseStableCamelCasePayloads(t *testing.T) {
 		t.Fatalf("chat plugin payload = %s, want %s", got, want)
 	}
 
-	dialog := pluginEventData(samp.Event{Type: samp.EventDialog, Data: samp.DialogEvent{ID: 7, Style: 2, Title: "Title", RawMessage: []byte("private")}})
+	dialog := pluginEventData(samp.Event{Type: samp.EventDialog, Data: samp.DialogEvent{ID: 7, Style: 2, Title: "Title"}})
 	encoded, err = json.Marshal(dialog)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if strings.Contains(string(encoded), "RawMessage") || strings.Contains(string(encoded), "private") {
-		t.Fatalf("dialog payload leaked decoder internals: %s", encoded)
 	}
 
 	movement := samp.MotionEvent{
@@ -485,7 +467,7 @@ func TestSnapshotDoesNotShareMutableState(t *testing.T) {
 	i := &instance{snap: domain.Snapshot{
 		Chat:         []domain.ChatMessage{{Text: "original"}},
 		Commands:     []domain.QuickCommand{{Label: "original"}},
-		ActiveDialog: &domain.Dialog{Title: "original", RawMessage: []byte("original")},
+		ActiveDialog: &domain.Dialog{Title: "original"},
 	}}
 	snapshot := i.snapshot()
 	if snapshot.Chat != nil {
@@ -493,8 +475,7 @@ func TestSnapshotDoesNotShareMutableState(t *testing.T) {
 	}
 	snapshot.Commands[0].Label = "changed"
 	snapshot.ActiveDialog.Title = "changed"
-	snapshot.ActiveDialog.RawMessage[0] = 'X'
-	if i.snap.Chat[0].Text != "original" || i.snap.Commands[0].Label != "original" || i.snap.ActiveDialog.Title != "original" || string(i.snap.ActiveDialog.RawMessage) != "original" {
+	if i.snap.Chat[0].Text != "original" || i.snap.Commands[0].Label != "original" || i.snap.ActiveDialog.Title != "original" {
 		t.Fatal("snapshot shares mutable state with the live instance")
 	}
 }
@@ -704,6 +685,59 @@ func TestChatEventsHaveAnIndependentQueue(t *testing.T) {
 		t.Fatalf("state queue size = %d", len(stateEvents))
 	}
 }
+
+func TestStateQueueKeepsNewestUpdate(t *testing.T) {
+	m := newManager(t)
+	stateEvents, _, cleanup, err := m.Subscribe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	for value := 1; value <= stateEventQueueSize+1; value++ {
+		m.emit(domain.Event{Type: domain.EventInstanceUpdated, Data: value})
+	}
+	var latest any
+	for len(stateEvents) > 0 {
+		latest = (<-stateEvents).Data
+	}
+	if latest != stateEventQueueSize+1 {
+		t.Fatalf("latest state event = %v, want %d", latest, stateEventQueueSize+1)
+	}
+}
+
+func TestStaleDialogDeferDoesNotConsumeNewDialog(t *testing.T) {
+	m := newManager(t)
+	snapshot, err := m.Create(domain.Server{Host: "127.0.0.1", Port: 7777, Nickname: "tester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	i, ok := m.find(snapshot.Server.ID)
+	if !ok {
+		t.Fatal("created instance was not found")
+	}
+	receivedAt := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	i.mu.Lock()
+	i.client = &samp.Client{}
+	i.snap.Connection.Status = domain.StatusConnected
+	i.snap.ActiveDialog = &domain.Dialog{ID: 2, ReceivedAt: receivedAt}
+	i.mu.Unlock()
+
+	if err := m.Action(snapshot.Server.ID, domain.ActionDeferDialog, map[string]any{
+		"dialogId":         float64(1),
+		"dialogReceivedAt": receivedAt.Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	current := i.snapshot()
+	if current.ActiveDialog == nil || current.ActiveDialog.ID != 2 {
+		t.Fatalf("stale defer changed active dialog: %+v", current.ActiveDialog)
+	}
+	if len(current.Dialogs) != 0 {
+		t.Fatalf("stale defer queued a dialog: %+v", current.Dialogs)
+	}
+}
+
 func TestCreateValidatesInput(t *testing.T) {
 	m := newManager(t)
 	if _, e := m.Create(domain.Server{Port: 70000}); e == nil {

@@ -91,9 +91,110 @@ describe('ServerDialog', () => {
     await waitFor(() =>
       expect(action).toHaveBeenCalledWith('test-instance', 'dialog', {
         dialogId: 20,
+        dialogReceivedAt: snapshot.activeDialog!.receivedAt,
         buttonId: 1,
         listItem: 1,
         inputText: 'Second',
+      }),
+    )
+    action.mockRestore()
+  })
+
+  it('defaults an ordinary list to its first row and filters blank rows', async () => {
+    const action = vi.spyOn(api, 'action').mockResolvedValue(undefined)
+    render(
+      <ServerDialog
+        value={{
+          ...snapshot,
+          activeDialog: {
+            ...snapshot.activeDialog!,
+            id: 21,
+            style: 2,
+            message: '{FF0000}First \n\nSecond\n',
+            button1: 'Select',
+          },
+        }}
+      />,
+    )
+
+    fireEvent.click(screen.getByText('Select'))
+    await waitFor(() =>
+      expect(action).toHaveBeenCalledWith('test-instance', 'dialog', {
+        dialogId: 21,
+        dialogReceivedAt: snapshot.activeDialog!.receivedAt,
+        buttonId: 1,
+        listItem: 0,
+        inputText: 'First ',
+      }),
+    )
+    action.mockRestore()
+  })
+
+  it('uses the filtered ordinary-list index and responds on a double click', async () => {
+    const action = vi.spyOn(api, 'action').mockResolvedValue(undefined)
+    render(
+      <ServerDialog
+        value={{
+          ...snapshot,
+          activeDialog: {
+            ...snapshot.activeDialog!,
+            id: 22,
+            style: 2,
+            message: 'First\n\nSecond',
+            button1: 'Select',
+          },
+        }}
+      />,
+    )
+
+    const second = screen.getByRole('button', { name: 'Second' })
+    fireEvent.click(second)
+    fireEvent.click(second)
+    await waitFor(() =>
+      expect(action).toHaveBeenCalledWith('test-instance', 'dialog', {
+        dialogId: 22,
+        dialogReceivedAt: snapshot.activeDialog!.receivedAt,
+        buttonId: 1,
+        listItem: 1,
+        inputText: 'Second',
+      }),
+    )
+    action.mockRestore()
+  })
+
+  it('resets list state when the server reuses a dialog id', async () => {
+    const action = vi.spyOn(api, 'action').mockResolvedValue(undefined)
+    const firstDialog = {
+      ...snapshot.activeDialog!,
+      id: 23,
+      style: 2,
+      message: 'Old first\nOld second',
+      button1: 'Select',
+      receivedAt: '2026-01-01T00:00:00.000Z',
+    }
+    const { rerender } = render(<ServerDialog value={{ ...snapshot, activeDialog: firstDialog }} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Old second' }))
+
+    rerender(
+      <ServerDialog
+        value={{
+          ...snapshot,
+          activeDialog: {
+            ...firstDialog,
+            message: 'New first\nNew second',
+            receivedAt: '2026-01-01T00:00:01.000Z',
+          },
+        }}
+      />,
+    )
+    fireEvent.click(screen.getByText('Select'))
+    await waitFor(() =>
+      expect(action).toHaveBeenCalledWith('test-instance', 'dialog', {
+        dialogId: 23,
+        dialogReceivedAt: '2026-01-01T00:00:01.000Z',
+        buttonId: 1,
+        listItem: 0,
+        inputText: 'New first',
       }),
     )
     action.mockRestore()

@@ -31,22 +31,19 @@ import (
 var statePublishInterval = 500 * time.Millisecond
 
 const (
-	actionTimeout                   = 5 * time.Second
-	maxPluginSafeInteger      int64 = 1<<53 - 1
-	reconnectDelay                  = 2 * time.Second
-	defaultChatColor                = "#ffffffff"
-	errorChatColor                  = "#ff6b6bff"
-	dialogStyleList                 = 2
-	dialogStyleTabList              = 4
-	dialogStyleTabListHeaders       = 5
-	maxSubscribers                  = 16
-	stateEventQueueSize             = 2
-	chatEventQueueSize              = 64
-	maxHostBytes                    = 253
-	maxNicknameBytes                = 96
-	maxPasswordBytes                = 128
-	maxCommandLabelBytes            = 128
-	maxCommandTextBytes             = 1024
+	actionTimeout              = 5 * time.Second
+	maxPluginSafeInteger int64 = 1<<53 - 1
+	reconnectDelay             = 2 * time.Second
+	defaultChatColor           = "#ffffffff"
+	errorChatColor             = "#ff6b6bff"
+	maxSubscribers             = 16
+	stateEventQueueSize        = 2
+	chatEventQueueSize         = 64
+	maxHostBytes               = 253
+	maxNicknameBytes           = 96
+	maxPasswordBytes           = 128
+	maxCommandLabelBytes       = 128
+	maxCommandTextBytes        = 1024
 )
 
 var serverInfoRefreshInterval = 5 * time.Second
@@ -512,7 +509,7 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 			if d.ID < 0 {
 				i.snap.ActiveDialog = nil
 			} else {
-				dialog := domain.Dialog{ID: int(d.ID), Style: int(d.Style), Title: d.Title, Message: d.Message, Button1: d.Button1, Button2: d.Button2, ReceivedAt: time.Now(), RawMessage: d.RawMessage}
+				dialog := domain.Dialog{ID: int(d.ID), Style: int(d.Style), Title: d.Title, Message: d.Message, Button1: d.Button1, Button2: d.Button2, ReceivedAt: time.Now()}
 				i.snap.ActiveDialog = &dialog
 			}
 		case samp.EventProtocolError:
@@ -1247,20 +1244,40 @@ func (m *Manager) action(ctx context.Context, id, action string, p map[string]an
 			return errors.New("inputText must be a string")
 		}
 		activeDialog := i.snap.ActiveDialog
+		if activeDialog == nil || activeDialog.ID != int(dialogID) {
+			i.mu.Unlock()
+			return fmt.Errorf("dialog %d is no longer active", dialogID)
+		}
+		if rawReceivedAt, exists := p["dialogReceivedAt"]; exists {
+			receivedAt, ok := rawReceivedAt.(string)
+			if !ok {
+				i.mu.Unlock()
+				return errors.New("dialogReceivedAt must be a string")
+			}
+			parsedReceivedAt, parseErr := time.Parse(time.RFC3339Nano, receivedAt)
+			if parseErr != nil || !parsedReceivedAt.Equal(activeDialog.ReceivedAt) {
+				i.mu.Unlock()
+				return fmt.Errorf("dialog %d is no longer active", dialogID)
+			}
+		}
+		// Match the Android client: consume the current dialog before entering
+		// the network path. A server can send the next dialog immediately after
+		// this response; clearing after RespondDialog would then erase that new
+		// dialog and leave the UI with a stale response state.
+		i.snap.ActiveDialog = nil
 		i.mu.Unlock()
+		m.publish(id, i)
 		var dialogErr error
 		requestCtx, cancel := actionContext(ctx)
 		defer cancel()
-		if rawInput, ok := rawDialogListInput(activeDialog, item); ok {
-			dialogErr = client.RespondDialogBytes(requestCtx, dialogID, button, item, rawInput)
-		} else {
-			dialogErr = client.RespondDialog(requestCtx, dialogID, button, item, input)
-		}
+		// The UI already supplies the selected row as UTF-8, just like the
+		// reference Android dialog. RespondDialog performs the single final
+		// conversion to this connection's configured server encoding.
+		dialogErr = client.RespondDialog(requestCtx, dialogID, button, item, input)
 		if dialogErr != nil {
 			return dialogErr
 		}
-		i.mu.Lock()
-		i.snap.ActiveDialog = nil
+		return nil
 	case domain.ActionClickPlayer:
 		value, err := requiredInteger(p, "playerId", 0, int64(^uint16(0)))
 		if err != nil {
@@ -1292,7 +1309,34 @@ func (m *Manager) action(ctx context.Context, id, action string, p map[string]an
 		}
 		i.mu.Lock()
 	case domain.ActionDeferDialog:
-		if i.snap.ActiveDialog != nil {
+		if activeDialog := i.snap.ActiveDialog; activeDialog != nil {
+			// A dialog component can finish unmounting after the server has
+			// already delivered the next dialog. Carry the identity through the
+			// defer action so that a stale close callback cannot defer that new
+			// dialog.
+			if _, exists := p["dialogId"]; exists {
+				dialogID, dialogErr := requiredInteger(p, "dialogId", -1<<31, 1<<31-1)
+				if dialogErr != nil {
+					i.mu.Unlock()
+					return dialogErr
+				}
+				if int(dialogID) != activeDialog.ID {
+					i.mu.Unlock()
+					return nil
+				}
+			}
+			if rawReceivedAt, exists := p["dialogReceivedAt"]; exists {
+				receivedAt, ok := rawReceivedAt.(string)
+				if !ok {
+					i.mu.Unlock()
+					return errors.New("dialogReceivedAt must be a string")
+				}
+				parsedReceivedAt, parseErr := time.Parse(time.RFC3339Nano, receivedAt)
+				if parseErr != nil || !parsedReceivedAt.Equal(activeDialog.ReceivedAt) {
+					i.mu.Unlock()
+					return nil
+				}
+			}
 			i.snap.Dialogs = append(i.snap.Dialogs, *i.snap.ActiveDialog)
 			if len(i.snap.Dialogs) > domain.MaxDeferredDialogs {
 				dropped := len(i.snap.Dialogs) - domain.MaxDeferredDialogs
@@ -1750,10 +1794,34 @@ func (m *Manager) emit(e domain.Event) {
 		if e.Type == domain.EventChatMessage || e.Type == domain.EventChatReset {
 			ch = subscription.chat
 		}
+		if ch == subscription.state {
+			enqueueLatestStateEvent(ch, e)
+			continue
+		}
 		select {
 		case ch <- e:
 		default:
 		}
+	}
+}
+
+// State patches are revisioned, so a consumer can recover after a gap by
+// fetching a complete snapshot. Keep the newest patch in the small queue: in
+// particular, dropping the patch that carries the next dialog leaves the UI
+// stuck on the previous dialog until a later unrelated update happens.
+func enqueueLatestStateEvent(ch chan domain.Event, event domain.Event) {
+	select {
+	case ch <- event:
+		return
+	default:
+	}
+	select {
+	case <-ch:
+	default:
+	}
+	select {
+	case ch <- event:
+	default:
 	}
 }
 
