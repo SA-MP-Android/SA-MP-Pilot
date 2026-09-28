@@ -57,14 +57,15 @@ const (
 )
 
 type Server struct {
-	ID                   string   `json:"id"`
-	Host                 string   `json:"host"`
-	Nickname             string   `json:"nickname"`
-	Password             string   `json:"password"`
-	Port                 int      `json:"port"`
-	Encoding             Encoding `json:"encoding"`
-	AutoConnect          bool     `json:"autoConnect"`
-	EmulatePCClientCheck bool     `json:"emulatePcClientCheck"`
+	ID                   string        `json:"id"`
+	Host                 string        `json:"host"`
+	Nickname             string        `json:"nickname"`
+	Password             string        `json:"password"`
+	Port                 int           `json:"port"`
+	Encoding             Encoding      `json:"encoding"`
+	Version              ClientVersion `json:"version"`
+	AutoConnect          bool          `json:"autoConnect"`
+	EmulatePCClientCheck bool          `json:"emulatePcClientCheck"`
 }
 type Connection struct {
 	Status      string     `json:"status"`

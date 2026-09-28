@@ -11,66 +11,65 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SA-MP-Android/SA-MP-Pilot/internal/domain"
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/gpci"
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/raknet"
 )
 
 const (
-	netGameVersion         uint32 = 4057
-	clientMod              uint8  = 1
-	clientVersion                 = "0.3.7-R4"
-	maxNicknameBytes              = 24
-	maxChatBytes                  = 255
-	maxCommandBytes               = 1024
-	maxDialogInputBytes           = 255
-	maxDialogMessageBytes         = 4096
-	packetAuthKey          uint8  = 12
-	RPCClientJoin          uint8  = 25
-	RPCDeath               uint8  = 53
-	RPCRequestClass        uint8  = 128
-	RPCRequestSpawn        uint8  = 129
-	RPCConnectionRejected  uint8  = 130
-	RPCSpawn               uint8  = 52
-	RPCWorldPlayerAdd      uint8  = 32
-	RPCSetSpawnInfo        uint8  = 68
-	RPCSetPlayerPos        uint8  = 12
-	RPCSetPlayerPosFindZ   uint8  = 13
-	RPCSetPlayerHealth     uint8  = 14
-	RPCSetPlayerSkin       uint8  = 153
-	RPCSetPlayerTeam       uint8  = 69
-	RPCSetFacingAngle      uint8  = 19
-	RPCSetPlayerArmour     uint8  = 66
-	RPCPutPlayerInVehicle  uint8  = 70
-	RPCRemoveFromVehicle   uint8  = 71
-	RPCSetPlayerColor      uint8  = 72
-	RPCSetPlayerDrunkLevel uint8  = 35
-	RPCClickPlayer         uint8  = 23
-	RPCEnterVehicle        uint8  = 26
-	RPCDialogResponse      uint8  = 62
-	RPCClickTextDraw       uint8  = 83
-	RPCChat                uint8  = 101
-	RPCServerCommand       uint8  = 50
-	RPCExitVehicle         uint8  = 154
-	RPCUpdateScores        uint8  = 155
-	RPCServerJoin          uint8  = 137
-	RPCServerQuit          uint8  = 138
-	RPCInitGame            uint8  = 139
-	RPCClientMessage       uint8  = 93
-	RPCClientCheck         uint8  = 103
-	RPCDialogBox           uint8  = 61
-	RPCShowTextDraw        uint8  = 134
-	RPCHideTextDraw        uint8  = 135
-	RPCSetTextDrawString   uint8  = 105
-	RPCCreateObject        uint8  = 44
-	RPCDestroyObject       uint8  = 47
-	RPCWorldVehicleAdd     uint8  = 164
-	RPCWorldVehicleRemove  uint8  = 165
-	RPCVehicleDeath        uint8  = 136
-	RPCSetVehicleHealth    uint8  = 147
-	packetPlayerSync       uint8  = 207
-	packetVehicleSync      uint8  = 200
-	packetPassengerSync    uint8  = 211
-	packetStatsUpdate      uint8  = 205
+	clientMod              uint8 = 1
+	maxNicknameBytes             = 24
+	maxChatBytes                 = 255
+	maxCommandBytes              = 1024
+	maxDialogInputBytes          = 255
+	maxDialogMessageBytes        = 4096
+	packetAuthKey          uint8 = 12
+	RPCClientJoin          uint8 = 25
+	RPCDeath               uint8 = 53
+	RPCRequestClass        uint8 = 128
+	RPCRequestSpawn        uint8 = 129
+	RPCConnectionRejected  uint8 = 130
+	RPCSpawn               uint8 = 52
+	RPCWorldPlayerAdd      uint8 = 32
+	RPCSetSpawnInfo        uint8 = 68
+	RPCSetPlayerPos        uint8 = 12
+	RPCSetPlayerPosFindZ   uint8 = 13
+	RPCSetPlayerHealth     uint8 = 14
+	RPCSetPlayerSkin       uint8 = 153
+	RPCSetPlayerTeam       uint8 = 69
+	RPCSetFacingAngle      uint8 = 19
+	RPCSetPlayerArmour     uint8 = 66
+	RPCPutPlayerInVehicle  uint8 = 70
+	RPCRemoveFromVehicle   uint8 = 71
+	RPCSetPlayerColor      uint8 = 72
+	RPCSetPlayerDrunkLevel uint8 = 35
+	RPCClickPlayer         uint8 = 23
+	RPCEnterVehicle        uint8 = 26
+	RPCDialogResponse      uint8 = 62
+	RPCClickTextDraw       uint8 = 83
+	RPCChat                uint8 = 101
+	RPCServerCommand       uint8 = 50
+	RPCExitVehicle         uint8 = 154
+	RPCUpdateScores        uint8 = 155
+	RPCServerJoin          uint8 = 137
+	RPCServerQuit          uint8 = 138
+	RPCInitGame            uint8 = 139
+	RPCClientMessage       uint8 = 93
+	RPCClientCheck         uint8 = 103
+	RPCDialogBox           uint8 = 61
+	RPCShowTextDraw        uint8 = 134
+	RPCHideTextDraw        uint8 = 135
+	RPCSetTextDrawString   uint8 = 105
+	RPCCreateObject        uint8 = 44
+	RPCDestroyObject       uint8 = 47
+	RPCWorldVehicleAdd     uint8 = 164
+	RPCWorldVehicleRemove  uint8 = 165
+	RPCVehicleDeath        uint8 = 136
+	RPCSetVehicleHealth    uint8 = 147
+	packetPlayerSync       uint8 = 207
+	packetVehicleSync      uint8 = 200
+	packetPassengerSync    uint8 = 211
+	packetStatsUpdate      uint8 = 205
 	// The Android client sends on-foot and passenger sync on channel 1. Vehicle
 	// sync remains on channel 0, as in CLocalPlayer::SendInCarFullSyncData.
 	// Enter/exit RPCs use channel 0 independently of the sync stream.
@@ -121,6 +120,7 @@ const (
 // Android raksamp client. In particular, PC client-check emulation is off by
 // default there and must not be advertised unless explicitly requested.
 type ClientOptions struct {
+	Version              domain.ClientVersion
 	EmulatePCClientCheck bool
 	RespawnPolicy        RespawnPolicy
 	// GPCI is the persisted per-installation client identifier used in the
@@ -275,6 +275,7 @@ type VehicleHealthEvent struct {
 	Health float32
 }
 type Client struct {
+	version               domain.ClientVersion
 	conn                  *raknet.Conn
 	rpcSender             func(context.Context, uint8, []byte, int, raknet.Reliability) error
 	codec                 encoding.Encoding
@@ -358,6 +359,25 @@ type Client struct {
 	pendingEvents         []Event
 }
 
+func protocolVersionFor(version domain.ClientVersion) uint32 {
+	if version == domain.Version03DLR1 {
+		return 4062
+	}
+	return 4057
+}
+
+func buildClientJoinRPC(version domain.ClientVersion, nickname, gpci string, serverChallenge uint32) []byte {
+	protocolVersion := protocolVersionFor(version)
+	payload := raknet.Writer{}
+	payload.Uint32(protocolVersion)
+	payload.Uint8(clientMod)
+	payload.String8(nickname)
+	payload.Uint32(serverChallenge ^ protocolVersion)
+	payload.String8(gpci)
+	payload.String8(string(version))
+	return raknet.EncodeRPC(RPCClientJoin, payload.Bytes(), payload.LenBits())
+}
+
 func DialClient(ctx context.Context, address, nickname, password, charset string) (*Client, error) {
 	return DialClientWithOptions(ctx, address, nickname, password, charset, ClientOptions{RespawnPolicy: RespawnPolicyAutomatic})
 }
@@ -367,6 +387,10 @@ func DialClientWithOptions(ctx context.Context, address, nickname, password, cha
 	// with the native client instance. Keep the emulated ClientCheck value
 	// scoped to this connection instead of the Go process/package lifetime.
 	clientCheckStart := time.Now()
+	version, valid := domain.NormalizeClientVersion(options.Version)
+	if !valid {
+		return nil, fmt.Errorf("samp: unsupported client version %q", version)
+	}
 	codec := codecFor(charset)
 	encoded, e := encodeText(codec, nickname)
 	if e != nil {
@@ -389,6 +413,7 @@ func DialClientWithOptions(ctx context.Context, address, nickname, password, cha
 	runCtx, cancel := context.WithCancel(context.Background())
 	c := &Client{
 		conn:                 conn,
+		version:              version,
 		codec:                codec,
 		events:               make(chan Event, 256),
 		ctx:                  runCtx,
@@ -423,15 +448,7 @@ func DialClientWithOptions(ctx context.Context, address, nickname, password, cha
 		c.Close()
 		return nil, ErrMalformedPacket
 	}
-	challenge := binary.LittleEndian.Uint32(accepted[9:13]) ^ netGameVersion
-	payload := raknet.Writer{}
-	payload.Uint32(netGameVersion)
-	payload.Uint8(clientMod)
-	payload.String8(string(encoded))
-	payload.Uint32(challenge)
-	payload.String8(clientGPCI)
-	payload.String8(clientVersion)
-	rpc := raknet.EncodeRPC(RPCClientJoin, payload.Bytes(), payload.LenBits())
+	rpc := buildClientJoinRPC(version, string(encoded), clientGPCI, binary.LittleEndian.Uint32(accepted[9:13]))
 	if e = conn.Write(ctx, rpc, raknet.Reliable); e != nil {
 		conn.Close()
 		return nil, e
@@ -1671,7 +1688,7 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 		if outcome == 0 {
 			return c.rejectClassSelection(), nil
 		}
-		spawnInfo, e := decodeSpawnInfo(r)
+		spawnInfo, e := decodeSpawnInfo(r, c.version == domain.Version03DLR1)
 		if e != nil {
 			return nil, e
 		}
@@ -1708,7 +1725,7 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 		return nil, nil
 	case RPCSetSpawnInfo:
 		c.observeServerInitialization()
-		spawnInfo, e := decodeSpawnInfo(r)
+		spawnInfo, e := decodeSpawnInfo(r, c.version == domain.Version03DLR1)
 		if e != nil {
 			return nil, e
 		}
@@ -1768,19 +1785,34 @@ func (c *Client) decodeRPC(rpc raknet.RPC) (*Event, error) {
 		c.clearVehicleState()
 		return &Event{Type: EventVehicleState, Data: VehicleStateEvent{}}, nil
 	case RPCWorldPlayerAdd:
-		player, e := decodeWorldPlayerAdd(r)
+		player, e := decodeWorldPlayerAdd(r, c.version == domain.Version03DLR1)
 		if e != nil {
 			return nil, e
 		}
 		return &Event{Type: EventPlayerSync, Data: player}, nil
 	case RPCSetPlayerSkin:
-		playerID, e := r.Uint32()
+		var playerID uint32
+		var e error
+		if c.version == domain.Version03DLR1 {
+			var id uint16
+			id, e = r.Uint16()
+			playerID = uint32(id)
+		} else {
+			playerID, e = r.Uint32()
+		}
 		if e != nil {
 			return nil, e
 		}
 		skin, e := r.Uint32()
 		if e != nil {
 			return nil, e
+		}
+		if c.version == domain.Version03DLR1 {
+			customSkin, err := r.Uint32()
+			if err != nil {
+				return nil, err
+			}
+			skin = resolveDLSkin(skin, customSkin)
 		}
 		return &Event{Type: EventAppearance, Data: PlayerEvent{ID: uint16(playerID), Skin: int32(skin), HasSkin: true}}, nil
 	case RPCSetPlayerTeam:
@@ -2055,7 +2087,7 @@ func (s SpawnInfo) PlayerEvent() PlayerEvent {
 	return PlayerEvent{Skin: s.Skin, Team: s.Team, X: s.Position[0], Y: s.Position[1], Z: s.Position[2], Rotation: s.Rotation, HasPosition: true, HasSkin: true, HasTeam: true, HasRotation: true}
 }
 
-func decodeSpawnInfo(r *raknet.Reader) (SpawnInfo, error) {
+func decodeSpawnInfo(r *raknet.Reader, dl bool) (SpawnInfo, error) {
 	team, err := r.Uint8()
 	if err != nil {
 		return SpawnInfo{}, err
@@ -2063,6 +2095,13 @@ func decodeSpawnInfo(r *raknet.Reader) (SpawnInfo, error) {
 	skin, err := r.Uint32()
 	if err != nil {
 		return SpawnInfo{}, err
+	}
+	if dl {
+		customSkin, err := r.Uint32()
+		if err != nil {
+			return SpawnInfo{}, err
+		}
+		skin = resolveDLSkin(skin, customSkin)
 	}
 	if _, err := r.Uint8(); err != nil {
 		return SpawnInfo{}, err
@@ -2078,7 +2117,7 @@ func decodeSpawnInfo(r *raknet.Reader) (SpawnInfo, error) {
 	return SpawnInfo{Team: team, Skin: int32(skin), Position: position, Rotation: rotation}, nil
 }
 
-func decodeWorldPlayerAdd(r *raknet.Reader) (PlayerEvent, error) {
+func decodeWorldPlayerAdd(r *raknet.Reader, dl bool) (PlayerEvent, error) {
 	id, err := r.Uint16()
 	if err != nil {
 		return PlayerEvent{}, err
@@ -2090,6 +2129,13 @@ func decodeWorldPlayerAdd(r *raknet.Reader) (PlayerEvent, error) {
 	skin, err := r.Uint32()
 	if err != nil {
 		return PlayerEvent{}, err
+	}
+	if dl {
+		customSkin, err := r.Uint32()
+		if err != nil {
+			return PlayerEvent{}, err
+		}
+		skin = resolveDLSkin(skin, customSkin)
 	}
 	position, err := readPosition(r)
 	if err != nil {
@@ -2104,6 +2150,18 @@ func decodeWorldPlayerAdd(r *raknet.Reader) (PlayerEvent, error) {
 		return PlayerEvent{}, err
 	}
 	return PlayerEvent{ID: id, Team: team, Skin: int32(skin), X: position[0], Y: position[1], Z: position[2], Rotation: rotation, Color: color, HasPosition: true, HasSkin: true, HasTeam: true, HasRotation: true, HasColor: true}, nil
+}
+
+// Headless clients have no GTA runtime model slots. Preserve the server's
+// custom skin ID for state consumers instead of reporting its fallback skin.
+func resolveDLSkin(baseSkin, customSkin uint32) uint32 {
+	if customSkin == 0 {
+		return baseSkin
+	}
+	if customSkin > 32767 && customSkin <= 65535 {
+		return uint32(int32(customSkin) - 65536)
+	}
+	return customSkin
 }
 
 func (c *Client) setPosition(position [3]float32) {

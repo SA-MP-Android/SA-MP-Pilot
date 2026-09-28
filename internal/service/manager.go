@@ -52,6 +52,7 @@ type instance struct {
 	mu        sync.RWMutex
 	snap      domain.Snapshot
 	published domain.Snapshot
+	ctx       context.Context
 	cancel    context.CancelFunc
 	client    *samp.Client
 	position  [3]float32
@@ -100,6 +101,7 @@ func New(st *store.Store, options ...Option) *Manager {
 	}
 	data := st.Data()
 	for _, s := range data.Servers {
+		s.Version, _ = domain.NormalizeClientVersion(s.Version)
 		if len(m.instances) >= domain.MaxInstances {
 			break
 		}
@@ -159,6 +161,7 @@ func (m *Manager) Update(id string, s domain.Server) (domain.Snapshot, error) {
 		return domain.Snapshot{}, err
 	}
 	s.ID = id
+	s.Version, _ = domain.NormalizeClientVersion(s.Version)
 	if err := m.store.Update(func(d *store.Data) error {
 		for index := range d.Servers {
 			if d.Servers[index].ID == id {
@@ -171,9 +174,22 @@ func (m *Manager) Update(id string, s domain.Server) (domain.Snapshot, error) {
 		return domain.Snapshot{}, err
 	}
 	i.mu.Lock()
+	previousVersion := i.snap.Server.Version
+	active := i.cancel != nil
 	i.snap.Server = s
 	i.mu.Unlock()
 	m.publish(id, i)
+	if active && previousVersion != s.Version {
+		if err := m.Connect(id); err != nil {
+			// The new version is already persisted. Stop the old connection and
+			// report the reconnect failure in state while preserving save success.
+			_ = m.Disconnect(id)
+			i.mu.Lock()
+			i.snap.Connection = domain.Connection{Status: domain.StatusError, Error: fmt.Sprintf("Saved client version, but reconnect failed: %v", err)}
+			i.mu.Unlock()
+			m.publish(id, i)
+		}
+	}
 	return i.snapshot(), nil
 }
 func (m *Manager) AddCommand(id string, command domain.QuickCommand) (domain.QuickCommand, error) {
@@ -279,6 +295,7 @@ func (m *Manager) Create(s domain.Server) (domain.Snapshot, error) {
 	if s.Encoding == "" {
 		s.Encoding = domain.EncodingUTF8
 	}
+	s.Version, _ = domain.NormalizeClientVersion(s.Version)
 	i := newInstance(s, m.syncEpoch)
 	if err := m.store.Update(func(d *store.Data) error { d.Servers = append(d.Servers, s); return nil }); err != nil {
 		m.mu.Unlock()
@@ -292,6 +309,9 @@ func (m *Manager) Create(s domain.Server) (domain.Snapshot, error) {
 }
 
 func validateServer(server domain.Server) error {
+	if _, valid := domain.NormalizeClientVersion(server.Version); !valid {
+		return errors.New("unsupported client version")
+	}
 	if server.Host == "" || server.Nickname == "" || server.Port < 1 || server.Port > 65535 {
 		return errors.New("host, nickname and a valid port are required")
 	}
@@ -314,6 +334,7 @@ func (m *Manager) Delete(id string) error {
 	cancel := i.cancel
 	client := i.client
 	i.cancel = nil
+	i.ctx = nil
 	i.client = nil
 	i.mu.Unlock()
 	if cancel != nil {
@@ -363,20 +384,19 @@ func (m *Manager) Connect(id string) error {
 	i.mu.Lock()
 	clear(i.snap.Chat)
 	i.snap.Chat = i.snap.Chat[:0]
-	i.mu.Unlock()
-	m.emit(domain.Event{Type: domain.EventChatReset, InstanceID: id})
-	i.mu.Lock()
 	oldCancel := i.cancel
 	oldClient := i.client
 	i.cancel = nil
 	i.client = nil
 	ctx, cancel := context.WithCancel(context.Background())
+	i.ctx = ctx
 	i.cancel = cancel
 	i.snap.Connection = domain.Connection{Status: domain.StatusConnecting}
 	resetConnectionState(i)
 	s := i.snap.Server
 	m.appendChat(i, fmt.Sprintf("Connecting to %s:%d...", s.Host, s.Port), defaultChatColor)
 	i.mu.Unlock()
+	m.emit(domain.Event{Type: domain.EventChatReset, InstanceID: id})
 	if oldCancel != nil {
 		oldCancel()
 	}
@@ -384,26 +404,22 @@ func (m *Manager) Connect(id string) error {
 		_ = oldClient.Close()
 	}
 	m.publish(id, i)
-	go m.connect(ctx, id, i, s)
+	go m.connect(ctx, id, i)
 	go m.publishWorker(ctx, id, i)
 	return nil
 }
-func (m *Manager) connect(ctx context.Context, id string, i *instance, s domain.Server) {
+func (m *Manager) connect(ctx context.Context, id string, i *instance) {
 	for {
+		i.mu.RLock()
+		s := i.snap.Server
+		i.mu.RUnlock()
 		err := m.connectAttempt(ctx, id, i, s)
 		if ctx.Err() != nil {
 			return
 		}
-		message := retryConnectionMessage(err)
-		i.mu.Lock()
-		i.client = nil
-		i.snap.Connection = domain.Connection{
-			Status: domain.StatusError,
-			Error:  connectionMessage(err),
+		if !m.recordConnectionFailure(ctx, id, i, err) {
+			return
 		}
-		m.appendChat(i, message, errorChatColor)
-		i.mu.Unlock()
-		m.publish(id, i)
 		timer := time.NewTimer(reconnectDelay)
 		select {
 		case <-ctx.Done():
@@ -411,11 +427,32 @@ func (m *Manager) connect(ctx context.Context, id string, i *instance, s domain.
 			return
 		case <-timer.C:
 		}
+		i.mu.RLock()
+		s = i.snap.Server
+		i.mu.RUnlock()
 		i.mu.Lock()
+		if i.ctx != ctx || ctx.Err() != nil {
+			i.mu.Unlock()
+			return
+		}
 		m.appendChat(i, fmt.Sprintf("Connecting to %s:%d...", s.Host, s.Port), defaultChatColor)
 		i.mu.Unlock()
 		m.publish(id, i)
 	}
+}
+
+func (m *Manager) recordConnectionFailure(ctx context.Context, id string, i *instance, err error) bool {
+	i.mu.Lock()
+	if i.ctx != ctx || ctx.Err() != nil {
+		i.mu.Unlock()
+		return false
+	}
+	i.client = nil
+	i.snap.Connection = domain.Connection{Status: domain.StatusError, Error: connectionMessage(err)}
+	m.appendChat(i, retryConnectionMessage(err), errorChatColor)
+	i.mu.Unlock()
+	m.publish(id, i)
+	return true
 }
 
 func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s domain.Server) error {
@@ -432,6 +469,7 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 		string(s.Encoding),
 		samp.ClientOptions{
 			EmulatePCClientCheck: s.EmulatePCClientCheck,
+			Version:              s.Version,
 			RespawnPolicy:        samp.RespawnPolicyAutomatic,
 			GPCI:                 clientGPCI,
 		},
@@ -440,10 +478,10 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 		return err
 	}
 	i.mu.Lock()
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || i.ctx != ctx {
 		i.mu.Unlock()
 		_ = client.Close()
-		return ctx.Err()
+		return context.Canceled
 	}
 	i.client = client
 	i.mu.Unlock()
@@ -454,6 +492,10 @@ func (m *Manager) connectAttempt(ctx context.Context, id string, i *instance, s 
 		// Apply the event to the in-memory snapshot before notifying plugins.
 		// Handlers may immediately read the snapshot or respond to a dialog.
 		i.mu.Lock()
+		if ctx.Err() != nil || i.ctx != ctx || i.client != client {
+			i.mu.Unlock()
+			return context.Canceled
+		}
 		publishSnapshot := true
 		switch event.Type {
 		case samp.EventJoined:
@@ -1051,6 +1093,7 @@ func (m *Manager) Disconnect(id string) error {
 	cancel := i.cancel
 	client := i.client
 	i.cancel = nil
+	i.ctx = nil
 	i.client = nil
 	i.snap.Connection = domain.Connection{Status: domain.StatusDisconnected}
 	resetConnectionState(i)

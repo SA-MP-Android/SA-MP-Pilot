@@ -835,3 +835,126 @@ func TestChatLogPaginationReadsNewestFirstWithoutLoadingWholeFile(t *testing.T) 
 		t.Fatalf("paginated message count = %d", count)
 	}
 }
+
+func TestInstanceVersionsAreIndependent(t *testing.T) {
+	m := newManager(t)
+	first, err := m.Create(domain.Server{Host: "127.0.0.1", Port: 7777, Nickname: "Alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := m.Create(domain.Server{Host: "127.0.0.1", Port: 7778, Nickname: "Bravo", Version: domain.Version03DLR1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Server.Version != domain.Version037R4 || second.Server.Version != domain.Version03DLR1 {
+		t.Fatalf("unexpected versions: %q, %q", first.Server.Version, second.Server.Version)
+	}
+	updated := second.Server
+	updated.Version = domain.Version037R4
+	if _, err := m.Update(second.Server.ID, updated); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := m.Get(first.Server.ID); got.Server.Version != domain.Version037R4 {
+		t.Fatalf("first instance changed: %q", got.Server.Version)
+	}
+	updated.Version = domain.Version03DLR1
+	if _, err := m.Update(second.Server.ID, updated); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := m.Get(first.Server.ID); got.Server.Version != domain.Version037R4 {
+		t.Fatalf("first instance changed: %q", got.Server.Version)
+	}
+	updated.Version = "custom"
+	if _, err := m.Update(second.Server.ID, updated); err == nil {
+		t.Fatal("unsupported version accepted")
+	}
+}
+
+func TestChangingActiveInstanceVersionReconnects(t *testing.T) {
+	m := newManager(t)
+	server, err := m.Create(domain.Server{Host: "127.0.0.1", Port: 7777, Nickname: "Alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Connect(server.Server.ID); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Disconnect(server.Server.ID)
+	i, _ := m.find(server.Server.ID)
+	i.mu.Lock()
+	m.appendChat(i, "previous connection", defaultChatColor)
+	i.mu.Unlock()
+	server.Server.Version = domain.Version03DLR1
+	if _, err := m.Update(server.Server.ID, server.Server); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := m.Get(server.Server.ID)
+	if snapshot.Server.Version != domain.Version03DLR1 {
+		t.Fatalf("version = %q", snapshot.Server.Version)
+	}
+	for _, message := range snapshot.Chat {
+		if message.Text == "previous connection" {
+			t.Fatal("version change kept the old connection")
+		}
+	}
+}
+
+func TestVersionSaveSucceedsWhenReconnectLogResetFails(t *testing.T) {
+	m := newManager(t)
+	server, err := m.Create(domain.Server{Host: "127.0.0.1", Port: 7777, Nickname: "Alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Connect(server.Server.ID); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Disconnect(server.Server.ID)
+	file := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(file, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	m.logDir = file
+	server.Server.Version = domain.Version03DLR1
+	snapshot, err := m.Update(server.Server.ID, server.Server)
+	if err != nil {
+		t.Fatalf("saved version reported failure: %v", err)
+	}
+	if snapshot.Server.Version != domain.Version03DLR1 || snapshot.Connection.Status != domain.StatusError {
+		t.Fatalf("save/reconnect state = %+v", snapshot)
+	}
+	if snapshot.Connection.Error == "" {
+		t.Fatal("reconnect failure was not reported")
+	}
+	if stored := m.store.Data().Servers[0].Version; stored != domain.Version03DLR1 {
+		t.Fatalf("persisted version = %q", stored)
+	}
+}
+
+func TestStaleConnectionFailureCannotOverwriteCurrentState(t *testing.T) {
+	m := newManager(t)
+	server, err := m.Create(domain.Server{Host: "127.0.0.1", Port: 7777, Nickname: "Alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	i, _ := m.find(server.Server.ID)
+	oldCtx, oldCancel := context.WithCancel(context.Background())
+	defer oldCancel()
+	currentCtx, currentCancel := context.WithCancel(context.Background())
+	defer currentCancel()
+	i.mu.Lock()
+	i.ctx = currentCtx
+	i.snap.Connection = domain.Connection{Status: domain.StatusConnecting}
+	i.mu.Unlock()
+	if m.recordConnectionFailure(oldCtx, server.Server.ID, i, errors.New("old connection")) {
+		t.Fatal("stale connection failure was accepted")
+	}
+	if got, _ := m.Get(server.Server.ID); got.Connection.Status != domain.StatusConnecting {
+		t.Fatalf("stale connection changed status to %q", got.Connection.Status)
+	}
+	if !m.recordConnectionFailure(currentCtx, server.Server.ID, i, errors.New("current connection")) {
+		t.Fatal("current connection failure was ignored")
+	}
+	if got, _ := m.Get(server.Server.ID); got.Connection.Status != domain.StatusError {
+		t.Fatalf("current connection status = %q", got.Connection.Status)
+	}
+}

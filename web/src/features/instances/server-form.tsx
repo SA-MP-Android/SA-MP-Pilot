@@ -78,6 +78,21 @@ export function ServerForm({
           </SelectContent>
         </Select>
       </Label>
+      <Label className="block space-y-2">
+        {t('server.version')}
+        <Select
+          value={value.version}
+          onValueChange={(version) => onChange({ ...value, version: version as Server['version'] })}
+        >
+          <SelectTrigger className="mt-1 h-9 w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="0.3.7-R4">0.3.7-R4</SelectItem>
+            <SelectItem value="0.3.DL-R1">0.3.DL-R1</SelectItem>
+          </SelectContent>
+        </Select>
+      </Label>
       <Label className="flex items-start gap-2 text-sm">
         <Checkbox
           checked={value.emulatePcClientCheck}

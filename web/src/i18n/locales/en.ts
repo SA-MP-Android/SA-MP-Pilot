@@ -40,6 +40,7 @@ export default {
     port: 'Port',
     nickname: 'Nickname',
     password: 'Password',
+    version: 'Client version',
     encoding: 'Encoding',
     autoConnect: 'Connect on startup',
     emulatePcClientCheck: 'Emulate PC ClientCheck',

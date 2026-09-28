@@ -16,6 +16,7 @@ function snapshot(revision: number, syncEpoch = 'epoch', overrides: Partial<Snap
       nickname: 'tester',
       password: '',
       encoding: 'utf-8',
+      version: '0.3.7-R4',
       autoConnect: false,
       emulatePcClientCheck: false,
     },

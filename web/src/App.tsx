@@ -44,6 +44,7 @@ const defaultServer: Omit<Server, 'id'> = {
   nickname: DEFAULT_NICKNAME,
   password: '',
   encoding: 'utf-8',
+  version: '0.3.7-R4',
   autoConnect: false,
   emulatePcClientCheck: false,
 }

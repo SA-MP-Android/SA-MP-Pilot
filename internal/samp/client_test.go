@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SA-MP-Android/SA-MP-Pilot/internal/domain"
 	"github.com/SA-MP-Android/SA-MP-Pilot/internal/raknet"
 )
 
@@ -832,7 +833,7 @@ func TestDecodeWorldPlayerAdd(t *testing.T) {
 	w.Float32(3)
 	w.Float32(90)
 	w.Uint32(0xFF0000FF)
-	player, err := decodeWorldPlayerAdd(raknet.NewReaderBits(w.Bytes(), w.LenBits()))
+	player, err := decodeWorldPlayerAdd(raknet.NewReaderBits(w.Bytes(), w.LenBits()), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -850,7 +851,7 @@ func TestDecodeSpawnInfo(t *testing.T) {
 	w.Float32(2)
 	w.Float32(3)
 	w.Float32(180)
-	info, err := decodeSpawnInfo(raknet.NewReaderBits(w.Bytes(), w.LenBits()))
+	info, err := decodeSpawnInfo(raknet.NewReaderBits(w.Bytes(), w.LenBits()), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1481,4 +1482,112 @@ func TestQueuedVehicleEntryContinuationDoesNotBlockCaller(t *testing.T) {
 		t.Fatal("queued vehicle continuation did not start")
 	}
 	close(release)
+}
+
+func TestDecodeDLSpawnInfo(t *testing.T) {
+	w := raknet.Writer{}
+	w.Uint8(2)
+	w.Uint32(100)
+	w.Uint32(20000)
+	w.Uint8(0)
+	w.Float32(1)
+	w.Float32(2)
+	w.Float32(3)
+	w.Float32(180)
+	info, err := decodeSpawnInfo(raknet.NewReaderBits(w.Bytes(), w.LenBits()), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Skin != 20000 || info.Position != [3]float32{1, 2, 3} || info.Rotation != 180 {
+		t.Fatalf("DL spawn info = %+v", info)
+	}
+}
+
+func TestDLSkinRPCUsesShortPlayerIDAndCustomSkin(t *testing.T) {
+	w := raknet.Writer{}
+	w.Uint16(42)
+	w.Uint32(100)
+	w.Uint32(62829) // signed 16-bit server model ID -2707
+	event, err := (&Client{version: domain.Version03DLR1}).decodeRPC(raknet.RPC{ID: RPCSetPlayerSkin, Payload: w.Bytes(), PayloadBits: w.LenBits()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	player := event.Data.(PlayerEvent)
+	if player.ID != 42 || player.Skin != -2707 {
+		t.Fatalf("DL skin = %+v", player)
+	}
+
+	standard := raknet.Writer{}
+	standard.Uint32(42)
+	standard.Uint32(100)
+	event, err = (&Client{}).decodeRPC(raknet.RPC{ID: RPCSetPlayerSkin, Payload: standard.Bytes(), PayloadBits: standard.LenBits()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := event.Data.(PlayerEvent); got.ID != 42 || got.Skin != 100 {
+		t.Fatalf("standard skin = %+v", got)
+	}
+}
+
+func TestDecodeDLWorldPlayerAddUsesCustomSkin(t *testing.T) {
+	w := raknet.Writer{}
+	w.Uint16(9)
+	w.Uint8(1)
+	w.Uint32(23)
+	w.Uint32(20000)
+	w.Float32(10.5)
+	w.Float32(-20.25)
+	w.Float32(3)
+	w.Float32(90)
+	w.Uint32(0xFF0000FF)
+	player, err := decodeWorldPlayerAdd(raknet.NewReaderBits(w.Bytes(), w.LenBits()), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if player.Skin != 20000 || player.X != 10.5 {
+		t.Fatalf("DL world player = %+v", player)
+	}
+}
+
+func TestClientJoinProfiles(t *testing.T) {
+	for _, profile := range []struct {
+		version domain.ClientVersion
+		wire    uint32
+	}{
+		{domain.Version037R4, 4057},
+		{domain.Version03DLR1, 4062},
+	} {
+		rpc, err := raknet.DecodeRPC(buildClientJoinRPC(profile.version, "Tester", "gpci", 0x12345678))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rpc.ID != RPCClientJoin {
+			t.Fatalf("RPC ID = %d", rpc.ID)
+		}
+		r := raknet.NewReaderBits(rpc.Payload, rpc.PayloadBits)
+		wire, err := r.Uint32()
+		if err != nil || wire != profile.wire {
+			t.Fatalf("version = %d, error %v", wire, err)
+		}
+		mod, err := r.Uint8()
+		if err != nil || mod != clientMod {
+			t.Fatalf("mod = %d, error %v", mod, err)
+		}
+		name, err := r.String8()
+		if err != nil || name != "Tester" {
+			t.Fatalf("name = %q, error %v", name, err)
+		}
+		response, err := r.Uint32()
+		if err != nil || response != 0x12345678^profile.wire {
+			t.Fatalf("challenge = %#x, error %v", response, err)
+		}
+		gpci, err := r.String8()
+		if err != nil || gpci != "gpci" {
+			t.Fatalf("GPCI = %q, error %v", gpci, err)
+		}
+		name, err = r.String8()
+		if err != nil || name != string(profile.version) {
+			t.Fatalf("version name = %q, error %v", name, err)
+		}
+	}
 }

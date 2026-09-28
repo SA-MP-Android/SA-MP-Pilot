@@ -41,6 +41,7 @@ export default {
     port: 'Порт',
     nickname: 'Ник',
     password: 'Пароль',
+    version: 'Версия клиента',
     encoding: 'Кодировка',
     autoConnect: 'Подключаться при запуске',
     emulatePcClientCheck: 'Эмулировать PC ClientCheck',

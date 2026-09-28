@@ -215,7 +215,13 @@ export function Workspace({
               {t('common.spawn')}
             </Button>
           )}
-          <Button variant="outline" onClick={() => setEditing(true)}>
+          <Button
+            variant="outline"
+            onClick={() => {
+              setServerForm({ ...server })
+              setEditing(true)
+            }}
+          >
             <Settings size={15} />
             {t('common.settings')}
           </Button>

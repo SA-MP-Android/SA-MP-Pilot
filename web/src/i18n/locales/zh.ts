@@ -40,6 +40,7 @@ export default {
     port: '端口',
     nickname: '昵称',
     password: '密码',
+    version: '客户端版本',
     encoding: '编码',
     autoConnect: '启动时自动连接',
     emulatePcClientCheck: '模拟 PC ClientCheck',

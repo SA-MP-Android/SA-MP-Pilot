@@ -6,6 +6,7 @@ export interface Server {
   nickname: string
   password: string
   encoding: 'utf-8' | 'gbk' | 'windows-1251'
+  version: '0.3.7-R4' | '0.3.DL-R1'
   autoConnect: boolean
   emulatePcClientCheck: boolean
 }

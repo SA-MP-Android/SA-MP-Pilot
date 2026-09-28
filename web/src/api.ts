@@ -33,6 +33,7 @@ export function normalizeSnapshot(value: Snapshot): Snapshot {
           ...value.server,
           // Older persisted servers do not have this optional compatibility flag.
           emulatePcClientCheck: value.server.emulatePcClientCheck ?? false,
+          version: value.server.version ?? '0.3.7-R4',
         }
       : value.server,
     revision: value.revision ?? 0,
